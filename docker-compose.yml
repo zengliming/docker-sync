@@ -1,0 +1,37 @@
+# docker-sync 本地部署示例
+#
+# 用法：
+#   mkdir -p data
+#   # Linux/macOS 首次运行时，让容器内的非 root 用户（UID 10001）可写绑定目录：
+#   sudo chown -R 10001:10001 data
+#   docker compose up -d --build
+#   # 打开 http://localhost:8080
+#
+# 注意：这是纯本地/内网工具，服务本身没有鉴权，不要直接暴露到公网。
+
+name: docker-sync
+
+services:
+  docker-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 可选：覆盖镜像内注入的版本号
+      # args:
+      #   VERSION: "0.1.0"
+    image: docker-sync:local
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # 让 SIGTERM 有足够时间完成优雅关闭（服务内部最多等待 30s）。
+    stop_grace_period: 40s
+    # 以下均可省略：Dockerfile 的 CMD 已给出等价默认值。
+    # 改成 environment 时请去掉每行开头的 "#" 再补全缩进。
+    # environment:
+    #   ADDR: ":8080"
+    #   DATA_DIR: "/data"
+    #   LOG_LEVEL: "info"          # debug | info | warn | error
+    #   TZ: "Asia/Shanghai"        # cron 表达式按此本地时区解释
+    # healthcheck 已由镜像内置（GET /api/health），通常无需覆盖。

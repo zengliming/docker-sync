@@ -1,0 +1,38 @@
+# Docker 构建上下文排除项（构建只需要 Go 源码、go.mod/go.sum 和内嵌前端）。
+# 运行时数据、构建产物和本地开发文件都不应进入镜像。
+
+# 运行时数据（任务状态、CAS 缓存、生成的 tar）
+data/
+tmp/
+*.tar
+*.tar.gz
+*.tgz
+
+# 构建产物
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# 依赖与前端工具（项目无 Node 构建步骤，防御性排除）
+node_modules/
+vendor/
+
+# 容器/部署本地覆盖文件与日志
+.env
+.env.*
+docker-compose.override.yml
+*.log

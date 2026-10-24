@@ -1,0 +1,17 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.test
+
+# runtime data
+/data/
+*.tar
+*.tar.gz
+
+# local scratch
+/tmp/
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db

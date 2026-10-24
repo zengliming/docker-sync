@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0e13">
+  <meta name="description" content="docker-sync 镜像同步服务控制台">
+  <title>docker-sync · 镜像同步服务</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%230b0f15'/%3E%3Cg%20fill='none'%20stroke='%234f9cf9'%20stroke-width='4'%20stroke-linejoin='round'%3E%3Cpath%20d='M14%2024l18-10%2018%2010-18%2010z'/%3E%3Cpath%20d='M14%2034l18%2010%2018-10'/%3E%3Cpath%20d='M14%2044l18%2010%2018-10'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 8l-9-5-9 5 9 5 9-5z"></path>
+            <path d="M3 8v8l9 5 9-5V8"></path>
+            <path d="M12 13v8"></path>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <div class="brand-name">docker-sync</div>
+          <div class="brand-sub">镜像同步服务</div>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav" aria-label="主导航">
+        <a href="#/dashboard" data-route="dashboard" title="仪表盘">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+            <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+            <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+          </svg>
+          <span>仪表盘</span>
+        </a>
+        <a href="#/tasks" data-route="tasks" title="任务">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 8l-9-5-9 5 9 5 9-5z"></path>
+            <path d="M3 8v8l9 5 9-5V8"></path>
+            <path d="M12 13v8"></path>
+          </svg>
+          <span>任务</span>
+        </a>
+        <a href="#/runs" data-route="runs" title="运行记录">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M10 8.5l6 3.5-6 3.5z"></path>
+          </svg>
+          <span>运行记录</span>
+        </a>
+        <a href="#/files" data-route="files" title="文件">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="4" rx="1"></rect>
+            <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>
+            <path d="M10 12h4"></path>
+          </svg>
+          <span>文件</span>
+        </a>
+        <a href="#/settings" data-route="settings" title="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.86l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.86-.34 1.7 1.7 0 0 0-1 1.53V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.53 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.86 1.7 1.7 0 0 0-1.53-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.53-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.86.34h.04A1.7 1.7 0 0 0 10 3.1V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.53 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.86v.04A1.7 1.7 0 0 0 20.9 10H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path>
+          </svg>
+          <span>设置</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div>服务版本 <span id="sidebar-version">—</span></div>
+        <div class="sidebar-foot-note">离线内嵌前端</div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1 id="page-title">仪表盘</h1>
+          <div class="page-subline" id="page-sub">服务概览与最近运行</div>
+        </div>
+        <div class="topbar-actions">
+          <div class="status-pill" id="service-status" title="服务状态">
+            <span class="dot"></span><span>连接中…</span>
+          </div>
+          <div class="sse connecting" id="sse-status" title="实时事件连接状态">
+            <span class="sse-dot"></span><span id="sse-label">连接中</span>
+          </div>
+          <button type="button" class="btn btn-ghost" id="refresh-btn" data-action="refresh" title="刷新当前页数据">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+              <path d="M21 3v6h-6"></path>
+            </svg>
+            <span>刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="view" id="view" aria-live="polite">
+        <div class="boot-loading"><span class="spinner"></span><span>正在加载…</span></div>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="drawer-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="false"></div>
+
+  <noscript>
+    <p class="noscript-tip">docker-sync 控制台需要启用 JavaScript。</p>
+  </noscript>
+</body>
+</html>
