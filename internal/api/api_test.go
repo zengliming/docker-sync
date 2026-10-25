@@ -517,6 +517,100 @@ func TestSettingsEndpoints(t *testing.T) {
 	}
 }
 
+func TestSettingsProxyFields(t *testing.T) {
+	env := newTestEnv(t)
+
+	body := `{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,
+		"proxyUrl":" socks5://127.0.0.1:7890 ","noProxy":"docker.io, *.corp.local, 10.0.0.1:5000",
+		"registries":[{"host":"ghcr.io","proxyUrl":"http://127.0.0.1:1080"},{"host":"registry.local:5000","proxyUrl":"-"}]}`
+	rec := env.do(t, http.MethodPut, "/api/settings", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	saved := decodeBody[model.Settings](t, rec)
+	if saved.ProxyURL != "socks5://127.0.0.1:7890" {
+		t.Fatalf("proxyUrl = %q, want trimmed value", saved.ProxyURL)
+	}
+	if saved.NoProxy != "docker.io, *.corp.local, 10.0.0.1:5000" {
+		t.Fatalf("noProxy = %q", saved.NoProxy)
+	}
+	if len(saved.Registries) != 2 || saved.Registries[0].ProxyURL != "http://127.0.0.1:1080" || saved.Registries[1].ProxyURL != "-" {
+		t.Fatalf("registries = %+v", saved.Registries)
+	}
+	got := decodeBody[model.Settings](t, env.do(t, http.MethodGet, "/api/settings", ""))
+	if got.ProxyURL != "socks5://127.0.0.1:7890" || got.Registries[0].ProxyURL != "http://127.0.0.1:1080" {
+		t.Fatalf("reloaded settings = %+v", got)
+	}
+	// "-" means "always connect directly" and must be accepted globally.
+	if rec := env.do(t, http.MethodPut, "/api/settings",
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"proxyUrl":"-","noProxy":""}`); rec.Code != http.StatusOK {
+		t.Fatalf("dash proxy status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	for _, bad := range []string{
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"proxyUrl":"ftp://127.0.0.1:21"}`,
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"proxyUrl":"http://"}`,
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"noProxy":"http://docker.io"}`,
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"noProxy":"docker.io/v2"}`,
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"registries":[{"host":"ghcr.io","proxyUrl":"socks4a://127.0.0.1:1080"}]}`,
+	} {
+		if rec := env.do(t, http.MethodPut, "/api/settings", bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad proxy settings status = %d for %s", rec.Code, bad)
+		}
+	}
+}
+
+func TestProxyTestEndpoint(t *testing.T) {
+	env := newTestEnv(t)
+
+	for _, bad := range []string{
+		`{"proxyUrl":"ftp://127.0.0.1:21"}`,
+		`{"image":"not a valid! ref"}`,
+		`{"proxyUrl":"http://127.0.0.1:1","noProxy":"http://has-a-scheme"}`,
+		`{"noProxy":"some/path"}`,
+	} {
+		if rec := env.do(t, http.MethodPost, "/api/settings/proxy-test", bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad proxy-test status = %d for %s", rec.Code, bad)
+		}
+	}
+
+	// An explicit, unreachable proxy must report a failure without failing the
+	// HTTP call itself.
+	rec := env.do(t, http.MethodPost, "/api/settings/proxy-test", `{"proxyUrl":"http://127.0.0.1:1","image":"alpine:3.20"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxy-test status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	out := decodeBody[proxyTestResponse](t, rec)
+	if out.OK {
+		t.Fatalf("probe through a dead proxy reported success: %+v", out)
+	}
+	if out.Target != "https://registry-1.docker.io/v2/" {
+		t.Fatalf("target = %q", out.Target)
+	}
+	if out.ProxyURL != "http://127.0.0.1:1" || out.Error == "" {
+		t.Fatalf("probe result = %+v", out)
+	}
+
+	// Omitting the fields probes with the stored configuration.
+	if rec := env.do(t, http.MethodPut, "/api/settings",
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"proxyUrl":"http://127.0.0.1:1"}`); rec.Code != http.StatusOK {
+		t.Fatalf("put settings status = %d", rec.Code)
+	}
+	out = decodeBody[proxyTestResponse](t, env.do(t, http.MethodPost, "/api/settings/proxy-test", `{}`))
+	if out.OK || out.ProxyURL != "http://127.0.0.1:1" {
+		t.Fatalf("stored-config probe = %+v", out)
+	}
+
+	// A registry marked as insecure is probed over plain HTTP.
+	if rec := env.do(t, http.MethodPut, "/api/settings",
+		`{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,"registries":[{"host":"registry.local:5000","insecure":true}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("put insecure settings status = %d", rec.Code)
+	}
+	out = decodeBody[proxyTestResponse](t, env.do(t, http.MethodPost, "/api/settings/proxy-test", `{"image":"registry.local:5000/team/app:1","proxyUrl":"http://127.0.0.1:1"}`))
+	if out.Target != "http://registry.local:5000/v2/" {
+		t.Fatalf("insecure target = %q", out.Target)
+	}
+}
+
 func TestHealthAndOverview(t *testing.T) {
 	env := newTestEnv(t)
 	health := decodeBody[map[string]any](t, env.do(t, http.MethodGet, "/api/health", ""))

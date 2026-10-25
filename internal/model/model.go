@@ -157,16 +157,27 @@ type RegistryAuth struct {
 	HasPassword bool   `json:"hasPassword"`
 	// Insecure allows plain HTTP for this registry (e.g. a LAN registry).
 	Insecure bool `json:"insecure"`
+	// ProxyURL overrides the global proxy for this host only. Empty means
+	// "use the global proxy". Set it to "-" to force a direct connection.
+	ProxyURL string `json:"proxyUrl,omitempty"`
 }
 
 // Settings is the global service configuration.
 type Settings struct {
-	DefaultPlatform        string         `json:"defaultPlatform"`
-	MaxConcurrentRuns      int            `json:"maxConcurrentRuns"`
-	MaxConcurrentDownloads int            `json:"maxConcurrentDownloads"`
-	BlobCacheMaxGB         int            `json:"blobCacheMaxGB"`
-	BlobCacheMaxAgeDays    int            `json:"blobCacheMaxAgeDays"`
-	Registries             []RegistryAuth `json:"registries"`
+	DefaultPlatform        string `json:"defaultPlatform"`
+	MaxConcurrentRuns      int    `json:"maxConcurrentRuns"`
+	MaxConcurrentDownloads int    `json:"maxConcurrentDownloads"`
+	BlobCacheMaxGB         int    `json:"blobCacheMaxGB"`
+	BlobCacheMaxAgeDays    int    `json:"blobCacheMaxAgeDays"`
+	// ProxyURL is the outbound proxy for registry requests, e.g.
+	// "http://127.0.0.1:7890" or "socks5://127.0.0.1:7890". Empty means
+	// "use the HTTP_PROXY/HTTPS_PROXY environment variables".
+	ProxyURL string `json:"proxyUrl,omitempty"`
+	// NoProxy is a comma separated list of hosts that must bypass ProxyURL,
+	// e.g. "docker.io,*.local". The docker.io spelling also covers
+	// registry-1.docker.io and index.docker.io.
+	NoProxy    string         `json:"noProxy,omitempty"`
+	Registries []RegistryAuth `json:"registries"`
 	// DataDir is read-only and reported for display purposes only.
 	DataDir string `json:"dataDir,omitempty"`
 }

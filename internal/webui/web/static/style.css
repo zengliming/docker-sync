@@ -1100,13 +1100,66 @@ textarea.input { min-height: 84px; resize: vertical; }
 
 .section-actions { display: flex; gap: 8px; margin-top: 12px; }
 
-.registry-table { min-width: 720px; }
+.registry-table { min-width: 860px; }
 .registry-table td { padding: 9px 10px; }
 .registry-table th { padding: 9px 10px; }
 .registry-table .input { min-height: 34px; padding: 7px 10px; font-size: 12.5px; }
 .registry-table .checkbox { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 .registry-table td.center { text-align: center; }
 .registry-table td.right { text-align: right; }
+
+/* proxy config + connectivity test */
+
+.proxy-test-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.proxy-test-field { flex: 1 1 320px; }
+.proxy-test-bar .btn { flex: none; }
+
+.proxy-test-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(11, 18, 27, 0.6);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.proxy-test-row.is-running { align-items: center; }
+
+.proxy-test-row.tone-ok {
+  border-color: rgba(53, 208, 127, 0.34);
+  background: rgba(53, 208, 127, 0.08);
+  color: #b9f0d2;
+}
+
+.proxy-test-row.tone-error {
+  border-color: rgba(242, 109, 109, 0.34);
+  background: rgba(242, 109, 109, 0.08);
+  color: #ffc0c0;
+}
+
+.proxy-test-row strong { color: var(--text); font-weight: 650; }
+.proxy-test-row.tone-ok strong { color: #7ee7b0; }
+.proxy-test-row.tone-error strong { color: #ff9a9a; }
+
+.proxy-test-icon { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.proxy-test-icon svg { display: block; width: 16px; height: 16px; }
+
+.proxy-test-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.proxy-test-meta { font-size: 11.5px; opacity: 0.86; }
 
 /* ------------------------------------------------------------------ toast */
 

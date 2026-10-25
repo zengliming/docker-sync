@@ -206,6 +206,15 @@ type Options struct {
 	HTTPClient *http.Client
 	// MaxConcurrentDownloads limits parallel blob downloads (default 4).
 	MaxConcurrentDownloads int
+	// ProxyURL routes registry traffic through a proxy. Accepted forms:
+	// "http://host:port", "https://host:port", "socks5://host:port",
+	// "socks5h://host:port", "socks4://host:port", or a bare "host:port"
+	// (treated as http). Empty means "use HTTP(S)_PROXY / NO_PROXY"; "-"
+	// means "always connect directly".
+	ProxyURL string
+	// NoProxy is a comma separated bypass list for ProxyURL. Entries may be
+	// an exact host, "host:port", "*.suffix", ".suffix" or "*".
+	NoProxy string
 }
 
 // Client is a registry API client. It is safe for concurrent use.
@@ -224,16 +233,24 @@ type token struct {
 
 // New creates a registry client.
 func New(opts Options) *Client {
+	transport := &http.Transport{
+		Proxy:                 proxyFunc(opts.ProxyURL, opts.NoProxy),
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 2 * time.Second,
+	}
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = &http.Client{Timeout: 0, Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			MaxIdleConns:          64,
-			MaxIdleConnsPerHost:   16,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-			ExpectContinueTimeout: 2 * time.Second,
-		}}
+		opts.HTTPClient = &http.Client{Transport: transport}
+	} else if opts.HTTPClient.Transport == nil {
+		// Honour the proxy configuration even when the caller supplied its own
+		// client (typically just for a timeout): clone it so we do not mutate
+		// the caller's struct.
+		clone := *opts.HTTPClient
+		clone.Transport = transport
+		opts.HTTPClient = &clone
 	}
 	if opts.MaxConcurrentDownloads <= 0 {
 		opts.MaxConcurrentDownloads = 4

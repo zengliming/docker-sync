@@ -177,6 +177,43 @@ Caddy 自动配置 HTTPS；`flush_interval -1` 用于 SSE 即时刷新。
 `GET /api/health` 返回 200 即视为健康；镜像内置 `HEALTHCHECK`（`wget` 请求 `/api/health`），
 compose/K8s 也可以直接复用该路径做存活探针。就绪探针同样可用 `/api/health`。
 
+### 5.4 出站代理
+
+两种方式可以叠加，优先级从高到低：
+
+1. **页面设置（推荐）**：控制台「设置」→「网络代理」填 `proxyUrl` / `noProxy`，
+   或给单个仓库填 `proxyUrl`。只影响 registry 出站请求，保存后立即生效，重启容器不丢
+   （存在 `data/state.json` 里）。
+2. **环境变量**：给容器加 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，影响进程内所有出站请求。
+
+容器里访问宿主机上的代理不能写 `127.0.0.1`（那是容器自己）：
+
+| 场景 | 写法 |
+| --- | --- |
+| Docker Desktop（Windows/macOS） | `http://host.docker.internal:7890` |
+| Linux 宿主机 + bridge 网络 | `http://172.17.0.1:7890`（docker0 网关）或宿主机内网 IP |
+| 代理在另一台机器 | `http://10.0.0.5:3128` |
+
+```yaml
+services:
+  docker-sync:
+    build: .
+    environment:
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
+      - NO_PROXY=localhost,127.0.0.1,registry.local
+      - TZ=Asia/Shanghai
+```
+
+- `NO_PROXY` 条目只写 host/域名（可带端口、`*.suffix`），不要带协议或路径。
+- 页面设置一旦填了值就优先于环境变量；想让某个仓库绕过页面代理，在该仓库行填 `-`。
+- 想强制全局直连，`proxyUrl` 填 `-`。
+- 常见错误：`Get "https://registry-1.docker.io/v2/": proxyconnect tcp: dial tcp ...` 说明代理不可达；
+  代理返回 407 表示需要认证（当前版本不支持 `http://user:pass@host:port` 形式的代理认证，
+  请改用无需认证的代理或在代理侧做 IP 白名单）。
+- 改完配置建议先用页面上的「测试连通性」验证，再触发同步；同步失败时日志里会记录
+  `镜像 <ref>: registry: ...` 的具体网络错误。
+
 ## 6. 数据备份与升级
 
 ### 6.1 备份

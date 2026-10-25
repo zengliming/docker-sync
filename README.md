@@ -31,7 +31,7 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 
 ## 界面预览
 
-内嵌 Web 控制台（1440×940 实拍，深色主题），五个页面 + 新建任务表单：
+内嵌 Web 控制台（1440×940 实拍，深色主题），五个页面 + 新建任务表单 + 网络代理卡片：
 
 | 仪表盘 | 任务 |
 | --- | --- |
@@ -44,6 +44,10 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 | 设置 | 新建任务 |
 | --- | --- |
 | ![设置](docs/screenshots/settings.png) | ![新建任务](docs/screenshots/task-modal.png) |
+
+| 网络代理 |
+| --- |
+| ![网络代理](docs/screenshots/settings-proxy.png) |
 
 ## 架构简述
 
@@ -167,6 +171,7 @@ Web 控制台「设置」页里还有一组运行时配置，保存在 `state.js
 | `blobCacheMaxGB` | `20` | 1–1024 | blob 缓存体积上限 |
 | `blobCacheMaxAgeDays` | `7` | 1–365 | blob 缓存最长保留天数 |
 | `registries` | 空 | — | 私有仓库凭据，见下文 |
+| `proxyUrl` / `noProxy` | 空 | — | 网络代理，见「网络代理」一节 |
 
 ## 数据目录结构
 
@@ -251,6 +256,25 @@ data/
 - 缓存与 tar 是两套独立的回收机制：tar 由 `keepVersions`/手动删除控制，blob 由
   `blobCacheMaxGB` / `blobCacheMaxAgeDays` 的定时 GC 控制。
 
+## 网络代理
+
+有些 registry 只有走代理才能访问（例如 `registry.k8s.io`、`gcr.io`、`ghcr.io` 在部分网络下不通）。
+控制台「设置」→「网络代理」中可以配置，保存后立即生效，无需重启：
+
+| 字段 | 示例 | 说明 |
+| --- | --- | --- |
+| `proxyUrl`（全局） | `http://127.0.0.1:7890`、`socks5://127.0.0.1:7890`、`192.168.1.10:3128` | 所有 registry 出站请求走这个代理；留空 = 跟随环境变量 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`；填 `-` = 强制直连 |
+| `noProxy` | `docker.io, *.corp.local, 10.0.0.1:5000` | 逗号分隔的直连列表，命中这些 host 时不走代理；`*` 表示全部直连 |
+| `registries[].proxyUrl` | `-` | 按仓库覆盖：留空继承全局，`-` 表示该仓库强制直连，其他值覆盖全局 |
+
+- 支持 `http`、`https`、`socks5`、`socks5h`、`socks4`；地址省略协议时默认按 `http://` 处理。
+- 代理作用于所有 registry 出站请求：拉 manifest、下载 blob、Bearer token 换票。
+- 「测试连通性」按钮会按当前配置访问对应 registry 的 `/v2/`（可填一个镜像引用来指定仓库），
+  返回是否可达、探测地址与耗时；代理认证失败会提示 407。
+- 容器部署也可以用环境变量让容器内进程走代理（见 docs/DEPLOY.md）：
+  `HTTP_PROXY=http://host.docker.internal:7890`、`NO_PROXY=localhost,127.0.0.1`。
+  环境变量对进程内所有出站请求生效，页面设置只作用于 registry 请求且优先级更高。
+
 ## 私有仓库认证
 
 在控制台「设置」→「仓库凭据」中按 host 添加：
@@ -261,6 +285,7 @@ data/
 | `username` | `robot$ci` | 仓库用户名 |
 | `password` | `********` | 密码/访问令牌；保存后接口只返回 `hasPassword` |
 | `insecure` | 不勾选 | 勾选后对该 registry 使用明文 HTTP（仅限内网） |
+| `proxyUrl` | `-` | 该仓库的代理覆盖，留空继承全局（见上一节） |
 
 - 支持 Registry 返回的 `WWW-Authenticate` 挑战：Basic 直接重试，Bearer 自动走 token 服务换取 token。
 - `docker.io`、`index.docker.io`、`registry-1.docker.io` 视为同一个 host，填任意一种都生效。
@@ -325,6 +350,12 @@ go test ./...
 **Q：多架构镜像怎么处理？**
 每个任务只同步一个平台（任务字段或全局默认平台）。同一镜像的不同平台可建多个任务，
 tar 文件名包含平台，互不覆盖。
+
+**Q：镜像仓库连不上，怎么走代理？**
+在「设置」→「网络代理」填 `proxyUrl`（例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`），
+`noProxy` 填不需要走代理的内网 host；也可以只给某个仓库单独配代理（填 `-` 表示强制直连）。
+先用「测试连通性」验证配置，再手动同步。容器里访问宿主机上的代理要写 `host.docker.internal`
+（Docker Desktop）或宿主机的内网地址，不能写 `127.0.0.1`。
 
 **Q：端口/路径可以通过环境变量改吗？**
 可以：`ADDR`、`DATA_DIR`、`LOG_LEVEL` 与对应 flag 等价；容器内默认 `-addr :8080 -data /data`。

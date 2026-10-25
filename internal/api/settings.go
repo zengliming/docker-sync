@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"docker-sync/internal/model"
 	"docker-sync/internal/registry"
@@ -71,5 +72,113 @@ func validateSettings(in model.Settings) error {
 		}
 		seen[key] = struct{}{}
 	}
+	if _, err := registry.ParseProxy(in.ProxyURL); err != nil {
+		return err
+	}
+	if err := validateNoProxy(in.NoProxy); err != nil {
+		return err
+	}
+	for i, reg := range in.Registries {
+		if _, err := registry.ParseProxy(reg.ProxyURL); err != nil {
+			return fmt.Errorf("registries[%d]: %w", i, err)
+		}
+	}
 	return nil
+}
+
+// validateNoProxy checks the bypass list syntax: comma separated hosts, no
+// scheme and no slash.
+func validateNoProxy(raw string) error {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "://") || strings.Contains(part, "/") {
+			return fmt.Errorf("noProxy 条目 %q 只能是主机名或 .suffix，不能包含协议或路径", part)
+		}
+	}
+	return nil
+}
+
+// proxyTestRequest is the body of POST /api/settings/proxy-test.
+type proxyTestRequest struct {
+	ProxyURL string `json:"proxyUrl"`
+	NoProxy  string `json:"noProxy"`
+	// Image optionally selects the registry to probe, e.g. "ghcr.io/x/y:1".
+	Image string `json:"image"`
+}
+
+// proxyTestResponse reports the probe outcome.
+type proxyTestResponse struct {
+	OK        bool   `json:"ok"`
+	Target    string `json:"target"`
+	ProxyURL  string `json:"proxyUrl,omitempty"`
+	NoProxy   string `json:"noProxy,omitempty"`
+	ElapsedMS int64  `json:"elapsedMs"`
+	Error     string `json:"error,omitempty"`
+}
+
+// handleProxyTest probes registry connectivity through the given proxy
+// configuration (or the stored one when the body omits it).
+func (s *Server) handleProxyTest(w http.ResponseWriter, r *http.Request) {
+	var in proxyTestRequest
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "解析请求体失败: %v", err)
+		return
+	}
+	target, err := s.proxyTestTarget(in.Image)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "参数校验失败: %v", err)
+		return
+	}
+	proxyURL := strings.TrimSpace(in.ProxyURL)
+	noProxy := in.NoProxy
+	if proxyURL == "" && noProxy == "" {
+		stored := s.store.SnapshotSettings()
+		proxyURL, noProxy = stored.ProxyURL, stored.NoProxy
+	}
+	if _, err := registry.ParseProxy(proxyURL); err != nil {
+		writeError(w, http.StatusBadRequest, "参数校验失败: %v", err)
+		return
+	}
+	if err := validateNoProxy(noProxy); err != nil {
+		writeError(w, http.StatusBadRequest, "参数校验失败: %v", err)
+		return
+	}
+	start := time.Now()
+	probeErr := registry.ProxyTest(r.Context(), target, proxyURL, noProxy, 15*time.Second)
+	resp := proxyTestResponse{
+		OK:        probeErr == nil,
+		Target:    target,
+		ProxyURL:  proxyURL,
+		NoProxy:   noProxy,
+		ElapsedMS: time.Since(start).Milliseconds(),
+	}
+	if probeErr != nil {
+		msg := probeErr.Error()
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		resp.Error = msg
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// proxyTestTarget maps an optional image reference to the registry /v2/
+// endpoint used by the proxy probe.
+func (s *Server) proxyTestTarget(image string) (string, error) {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return "https://registry-1.docker.io/v2/", nil
+	}
+	ref, err := registry.Parse(image)
+	if err != nil {
+		return "", fmt.Errorf("镜像引用 %q 非法: %v", image, err)
+	}
+	scheme := "https"
+	if auth, ok := s.store.RegistryAuthFor(ref.Registry); ok && auth.Insecure {
+		scheme = "http"
+	}
+	return scheme + "://" + ref.Endpoint() + "/v2/", nil
 }

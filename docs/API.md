@@ -214,9 +214,11 @@
   "maxConcurrentDownloads": 4,
   "blobCacheMaxGB": 20,
   "blobCacheMaxAgeDays": 7,
+  "proxyUrl": "",
+  "noProxy": "",
   "registries": [
-    {"host":"docker.io","username":"","password":"","hasPassword":false,"insecure":false},
-    {"host":"registry.local:5000","username":"admin","password":"","hasPassword":true,"insecure":true}
+    {"host":"docker.io","username":"","password":"","hasPassword":false,"insecure":false,"proxyUrl":""},
+    {"host":"registry.local:5000","username":"admin","password":"","hasPassword":true,"insecure":true,"proxyUrl":""}
   ],
   "dataDir": "/data"
 }
@@ -226,7 +228,40 @@
 - `PUT /api/settings` 接受同样结构；`password` 为空且 `hasPassword=true` 表示保留原有密码；
   传 `password` 会覆盖，`hasPassword=false` 且密码为空表示清空。`dataDir` 只读，忽略入参。
 - 校验：并发数 1–16，blobCacheMaxGB 1–1024，blobCacheMaxAgeDays 1–365，
-  `defaultPlatform` 合法，registries 的 host 非空且不重复。
+  `defaultPlatform` 合法，registries 的 host 非空且不重复，
+  `proxyUrl` / `registries[].proxyUrl` 必须是合法代理地址，`noProxy` 条目只能是主机名。
+
+### 代理字段
+
+| 字段 | 作用域 | 语义 |
+| --- | --- | --- |
+| `proxyUrl` | 全局 | 所有出站请求使用的代理。空 = 跟随环境变量 `HTTP_PROXY`/`HTTPS_PROXY`；`-` = 强制直连 |
+| `noProxy` | 全局 | 逗号分隔的直连列表，支持 `docker.io`、`host:port`、`*.corp.local`、`*`；命中后跳过代理 |
+| `registries[].proxyUrl` | 单个仓库 | 空 = 继承全局；`-` = 该仓库强制直连；其他值 = 覆盖全局代理 |
+
+- 支持的协议：`http`、`https`、`socks5`、`socks5h`、`socks4`（`socks5h` 与 `socks5` 均由 Go 解析为远程 DNS）。
+- 地址省略协议时默认补 `http://`，因此 `127.0.0.1:7890` 与 `http://127.0.0.1:7890` 等价。
+- 该代理作用于所有 Registry 出站请求：manifest、blob 下载、token 换票。
+- 修改保存在 `PUT /api/settings` 提交后立即生效（registry 客户端缓存会被清空）。
+
+### 测试代理连通性
+
+`POST /api/settings/proxy-test`
+
+```json
+{"proxyUrl":"http://127.0.0.1:7890","noProxy":"docker.io","image":"alpine:3.20"}
+```
+
+- 三个字段都可选：`proxyUrl`/`noProxy` 省略时取已保存的配置；`image` 省略时探测 Docker Hub
+  （`https://registry-1.docker.io/v2/`），传入镜像引用时探测该镜像所属仓库，并尊重该仓库的 `insecure` 设置。
+- → 200
+
+```json
+{"ok":true,"target":"https://registry-1.docker.io/v2/","proxyUrl":"http://127.0.0.1:7890","noProxy":"docker.io","elapsedMs":42}
+```
+
+- 探不到时仍是 200，但 `ok:false` 且带 `error` 字段（如连接失败、代理认证失败 407）。
+- 入参非法（代理地址不合法、noProxy 含协议或路径、镜像引用无法解析）返回 400。
 
 ## 静态页面
 

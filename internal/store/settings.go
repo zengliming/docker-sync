@@ -164,4 +164,11 @@ func (s *Store) sanitizeSettingsLocked() {
 	if set.Registries == nil {
 		set.Registries = []model.RegistryAuth{}
 	}
+	set.ProxyURL = strings.TrimSpace(set.ProxyURL)
+	set.NoProxy = strings.TrimSpace(set.NoProxy)
+	for i := range set.Registries {
+		set.Registries[i].Host = strings.TrimSpace(set.Registries[i].Host)
+		set.Registries[i].Username = strings.TrimSpace(set.Registries[i].Username)
+		set.Registries[i].ProxyURL = strings.TrimSpace(set.Registries[i].ProxyURL)
+	}
 }

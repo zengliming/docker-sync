@@ -139,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
+	mux.HandleFunc("POST /api/settings/proxy-test", s.handleProxyTest)
 
 	mux.HandleFunc("/api/", s.handleAPINotFound)
 

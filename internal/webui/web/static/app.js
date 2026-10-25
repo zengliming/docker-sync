@@ -34,7 +34,9 @@
     database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>',
     clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9.5 17h-19z"/><path d="M12 9v5"/><path d="M12 17.5h.01"/></svg>',
-    inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13l2.5-7h11L20 13"/><path d="M4 13v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="M4 13h4l1.5 2h5L16 13h4"/></svg>'
+    inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13l2.5-7h11L20 13"/><path d="M4 13v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="M4 13h4l1.5 2h5L16 13h4"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18"/><path d="M12 3a15 15 0 0 0 0 18"/></svg>'
   };
 
   /* ================================================================== */
@@ -53,6 +55,7 @@
     settings: null,
     settingsDraft: null,
     settingsDirty: false,
+    proxyTest: null,
     loading: { overview: false, tasks: false, runs: false, files: false, settings: false },
     errors: { overview: null, tasks: null, runs: null, files: null, settings: null },
     runFilter: { taskId: '', status: '' },
@@ -513,11 +516,14 @@
         username: r && typeof r.username === 'string' ? r.username : '',
         password: '',
         hasPassword: !!(r && r.hasPassword),
-        insecure: !!(r && r.insecure)
+        insecure: !!(r && r.insecure),
+        proxyUrl: r && typeof r.proxyUrl === 'string' ? r.proxyUrl : ''
       };
     }) : [];
     return {
       defaultPlatform: typeof d.defaultPlatform === 'string' ? d.defaultPlatform : '',
+      proxyUrl: typeof d.proxyUrl === 'string' ? d.proxyUrl : '',
+      noProxy: typeof d.noProxy === 'string' ? d.noProxy : '',
       maxConcurrentRuns: Number.isFinite(Number(d.maxConcurrentRuns)) ? Number(d.maxConcurrentRuns) : 2,
       maxConcurrentDownloads: Number.isFinite(Number(d.maxConcurrentDownloads)) ? Number(d.maxConcurrentDownloads) : 4,
       blobCacheMaxGB: Number.isFinite(Number(d.blobCacheMaxGB)) ? Number(d.blobCacheMaxGB) : 20,
@@ -1091,7 +1097,7 @@
 
   function registryRowsHtml(registries) {
     if (!registries.length) {
-      return '<tr><td colspan="5"><div class="empty empty-compact"><p>暂无仓库凭据。公共镜像无需凭据；私有仓库可添加 host、用户名与密码。</p></div></td></tr>';
+      return '<tr><td colspan="6"><div class="empty empty-compact"><p>暂无仓库凭据。公共镜像无需凭据；私有仓库可添加 host、用户名与密码。</p></div></td></tr>';
     }
     return registries.map(function (reg, index) {
       return '<tr data-reg-row data-has-password="' + (reg.hasPassword ? 'true' : 'false') + '">' +
@@ -1102,11 +1108,89 @@
         '<td><input class="input" type="password" autocomplete="new-password" data-reg-field="password" data-reg-index="' + index +
         '" value="' + esc(reg.password || '') + '" placeholder="' + (reg.hasPassword ? '已设置，留空保持不变' : '密码（可留空）') +
         '" aria-label="密码"></td>' +
+        '<td><input class="input mono" data-reg-field="proxyUrl" data-reg-index="' + index +
+        '" value="' + esc(reg.proxyUrl || '') + '" placeholder="留空=跟随全局，- =直连" aria-label="该仓库代理"></td>' +
         '<td class="center"><input type="checkbox" class="checkbox" data-reg-field="insecure" data-reg-index="' + index + '"' +
         (reg.insecure ? ' checked' : '') + ' aria-label="允许明文 HTTP"></td>' +
         '<td class="right">' + btn('移除', 'registry-remove', { data: { index: String(index) }, cls: 'btn-danger', size: 'sm' }) + '</td>' +
         '</tr>';
     }).join('');
+  }
+
+  function proxyTestHtml() {
+    const t = state.proxyTest;
+    if (!t) return '';
+    if (t.status === 'running') {
+      return '<div class="proxy-test-row is-running"><span class="spinner"></span><span>测试中…</span></div>';
+    }
+    const meta = function (res) {
+      const parts = [];
+      if (res.target) parts.push('目标 ' + res.target);
+      if (typeof res.elapsedMs === 'number') parts.push('耗时 ' + res.elapsedMs + ' ms');
+      if (typeof res.proxyUrl === 'string' && res.proxyUrl) parts.push('代理 ' + res.proxyUrl);
+      return parts.join(' · ');
+    };
+    if (t.status === 'ok') {
+      return '<div class="proxy-test-row tone-ok"><span class="proxy-test-icon">' + ICONS.check + '</span>' +
+        '<span class="proxy-test-body"><strong>连通正常</strong>' +
+        '<span class="proxy-test-meta mono">' + esc(meta(t)) + '</span></span></div>';
+    }
+    if (t.status === 'error') {
+      return '<div class="proxy-test-row tone-error"><span class="proxy-test-icon">' + ICONS.alert + '</span>' +
+        '<span class="proxy-test-body"><strong>连通失败</strong>' +
+        '<span class="proxy-test-meta">' + esc(t.message || '未知错误') + '</span>' +
+        (t.target ? '<span class="proxy-test-meta mono">' + esc(meta(t)) + '</span>' : '') +
+        '</span></div>';
+    }
+    return '';
+  }
+
+  function setProxyTestResult() {
+    const box = document.getElementById('proxy-test-result');
+    if (box) box.innerHTML = proxyTestHtml();
+  }
+
+  async function runProxyTest(button) {
+    const form = document.querySelector('form[data-form="settings"]');
+    if (!form || !state.settingsDraft) return;
+    const proxyInput = form.querySelector('[name="proxyUrl"]');
+    const noProxyInput = form.querySelector('[name="noProxy"]');
+    const imageInput = document.getElementById('settings-proxy-test-image');
+    const body = {
+      proxyUrl: proxyInput ? String(proxyInput.value).trim() : '',
+      noProxy: noProxyInput ? String(noProxyInput.value).trim() : '',
+      image: imageInput ? String(imageInput.value).trim() : ''
+    };
+    state.proxyTest = { status: 'running' };
+    setProxyTestResult();
+    setBusy(button, true, '测试中…');
+    try {
+      const res = await api('/api/settings/proxy-test', { method: 'POST', body: JSON.stringify(body) });
+      if (res && res.ok) {
+        state.proxyTest = {
+          status: 'ok',
+          target: res.target || '',
+          proxyUrl: res.proxyUrl || '',
+          noProxy: res.noProxy || '',
+          elapsedMs: typeof res.elapsedMs === 'number' ? res.elapsedMs : 0
+        };
+        toast('代理连通性测试通过', 'success');
+      } else {
+        state.proxyTest = {
+          status: 'error',
+          target: res ? (res.target || '') : '',
+          proxyUrl: res ? (res.proxyUrl || '') : '',
+          elapsedMs: res && typeof res.elapsedMs === 'number' ? res.elapsedMs : 0,
+          message: (res && res.error) || '代理未能连通目标仓库'
+        };
+        toast(state.proxyTest.message, 'error');
+      }
+    } catch (err) {
+      state.proxyTest = { status: 'error', message: err && err.message ? err.message : '测试请求失败' };
+      toast(state.proxyTest.message, 'error');
+    }
+    setBusy(button, false);
+    setProxyTestResult();
   }
 
   function renderSettings() {
@@ -1145,9 +1229,29 @@
       '<section class="card card-pad">' +
       '<div class="card-head"><h3>仓库凭据</h3><p>用于拉取私有镜像仓库。密码仅提交给服务端，读取接口只返回是否已设置。</p></div>' +
       '<div class="table-wrap"><table class="table registry-table"><thead><tr>' +
-      '<th>仓库地址</th><th>用户名</th><th>密码</th><th class="center">明文 HTTP</th><th class="right">操作</th>' +
+      '<th>仓库地址</th><th>用户名</th><th>密码</th><th>代理</th><th class="center">明文 HTTP</th><th class="right">操作</th>' +
       '</tr></thead><tbody>' + registryRowsHtml(d.registries || []) + '</tbody></table></div>' +
       '<div class="section-actions"><button type="button" class="btn btn-ghost" data-action="registry-add">＋ 添加仓库</button></div>' +
+      '</section>' +
+      '<section class="card card-pad">' +
+      '<div class="card-head"><h3>网络代理</h3><p>拉取镜像时使用的出站代理。留空表示跟随服务端 HTTP_PROXY / HTTPS_PROXY 环境变量。</p></div>' +
+      '<div class="settings-grid">' +
+      '<div class="field"><label for="settings-proxy-url">代理地址</label>' +
+      '<input id="settings-proxy-url" name="proxyUrl" class="input mono" placeholder="留空跟随环境变量；输入 - 强制直连；例如 http://127.0.0.1:7890 / socks5://127.0.0.1:1080" value="' +
+      esc(d.proxyUrl || '') + '">' +
+      '<span class="field-hint">支持 http / https / socks5 / socks5h / socks4；省略协议时按 http:// 处理；填 <code>-</code> 表示强制直连。</span></div>' +
+      '<div class="field"><label for="settings-no-proxy">不走代理的地址</label>' +
+      '<input id="settings-no-proxy" name="noProxy" class="input mono" placeholder="docker.io,*.local,*.corp.local（仅 host / host:port / *.suffix，不支持 CIDR）" value="' +
+      esc(d.noProxy || '') + '">' +
+      '<span class="field-hint">逗号分隔的主机名、<code>host:port</code> 或 <code>*.suffix</code>；<code>*</code> 表示全部直连。</span></div>' +
+      '</div>' +
+      '<div class="proxy-test-bar">' +
+      '<div class="field proxy-test-field"><label for="settings-proxy-test-image">测试目标镜像（可选）</label>' +
+      '<input id="settings-proxy-test-image" class="input mono" placeholder="例如 alpine:3.20，留空探测 registry-1.docker.io">' +
+      '<span class="field-hint">会向镜像所属仓库的 /v2/ 发起请求；该仓库若勾选明文 HTTP 则走 http。</span></div>' +
+      btn('测试连通性', 'proxy-test', { cls: 'btn-ghost' }) +
+      '</div>' +
+      '<div id="proxy-test-result">' + proxyTestHtml() + '</div>' +
       '</section>' +
       '</div>' +
       '<div class="form-actions"><button type="submit" class="btn btn-primary">保存设置</button></div>' +
@@ -1268,6 +1372,7 @@
     state.route = next;
     updateChrome();
     if (changed) closeDrawer();
+    if (changed && next !== 'settings') state.proxyTest = null;
     render();
     loadRouteData(next, routeHasData(next));
   }
@@ -1599,6 +1704,11 @@
       if (input) draft[key] = input.value;
     });
 
+    ['proxyUrl', 'noProxy'].forEach(function (key) {
+      const input = form.querySelector('[name="' + key + '"]');
+      if (input) draft[key] = input.value;
+    });
+
     const rows = form.querySelectorAll('[data-reg-row]');
     const registries = [];
     for (let i = 0; i < rows.length; i += 1) {
@@ -1610,12 +1720,14 @@
       const usernameInput = get('username');
       const passwordInput = get('password');
       const insecureInput = get('insecure');
+      const proxyInput = get('proxyUrl');
       registries.push({
         host: hostInput ? hostInput.value : '',
         username: usernameInput ? usernameInput.value : '',
         password: passwordInput ? passwordInput.value : '',
         hasPassword: row.getAttribute('data-has-password') === 'true',
-        insecure: !!(insecureInput && insecureInput.checked)
+        insecure: !!(insecureInput && insecureInput.checked),
+        proxyUrl: proxyInput ? proxyInput.value : ''
       });
     }
     draft.registries = registries;
@@ -1652,6 +1764,8 @@
         maxConcurrentDownloads: 0,
         blobCacheMaxGB: 0,
         blobCacheMaxAgeDays: 0,
+        proxyUrl: String(fd.get('proxyUrl') || '').trim(),
+        noProxy: String(fd.get('noProxy') || '').trim(),
         registries: []
       };
       numberFields.forEach(function (field) {
@@ -1671,6 +1785,7 @@
         const usernameInput = row.querySelector('[data-reg-field="username"]');
         const passwordInput = row.querySelector('[data-reg-field="password"]');
         const insecureInput = row.querySelector('[data-reg-field="insecure"]');
+        const proxyInput = row.querySelector('[data-reg-field="proxyUrl"]');
         const host = String(hostInput ? hostInput.value : '').trim();
         if (!host) {
           if (hostInput) hostInput.focus();
@@ -1688,6 +1803,7 @@
           host: host,
           username: String(usernameInput ? usernameInput.value : '').trim(),
           insecure: !!(insecureInput && insecureInput.checked),
+          proxyUrl: String(proxyInput ? proxyInput.value : '').trim(),
           hasPassword: hasPassword
         };
         if (password) registry.password = password;
@@ -1884,7 +2000,7 @@
       case 'registry-add':
         captureSettingsForm();
         if (state.settingsDraft) {
-          state.settingsDraft.registries.push({ host: '', username: '', password: '', hasPassword: false, insecure: false });
+          state.settingsDraft.registries.push({ host: '', username: '', password: '', hasPassword: false, insecure: false, proxyUrl: '' });
           render();
         }
         break;
@@ -1899,6 +2015,9 @@
       }
       case 'file-delete':
         await deleteFile(el);
+        break;
+      case 'proxy-test':
+        await runProxyTest(el);
         break;
       default:
         break;

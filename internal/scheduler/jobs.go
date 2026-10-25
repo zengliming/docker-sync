@@ -512,11 +512,17 @@ func (s *Scheduler) clientFor(host string) RegistryAPI {
 	opts := registry.Options{
 		MaxConcurrentDownloads: st.MaxConcurrentDownloads,
 		UserAgent:              "docker-sync",
+		ProxyURL:               st.ProxyURL,
+		NoProxy:                st.NoProxy,
 	}
 	if auth, ok := s.store.RegistryAuthFor(host); ok {
 		opts.Username = auth.Username
 		opts.Password = auth.Password
 		opts.Insecure = auth.Insecure
+		// A per-registry proxy overrides the global one.
+		if auth.ProxyURL != "" {
+			opts.ProxyURL = auth.ProxyURL
+		}
 	}
 	client := registry.New(opts)
 
