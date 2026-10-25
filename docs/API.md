@@ -172,7 +172,7 @@
 }
 ```
 
-- `trigger`：`manual`（手动同步）/ `schedule`（定时检查）/ `check`（手动检查）。
+- `trigger`：`manual`（手动同步）/ `schedule`（定时检查）/ `check`（手动检查）/ `upload`（手动上传 SMB）。
 - `status`：`running` / `success` / `skipped` / `error` / `canceled`。
 - `phase`：`queued` / `resolving` / `downloading` / `packing` / `done`，用于展示进度。
 - `logs` 仅在单个 run 详情接口里返回，最多保留最近 500 行。
@@ -203,10 +203,11 @@
   `Content-Disposition: attachment; filename="<name>"`，文件不存在 404，非法文件名 400。
 - `DELETE /api/files/{name}` → `{"ok":true}`，非法/不存在 404/400。
 - `POST /api/files/{name}/smb` → 手动把该 tar 复制到已配置的 SMB 共享，无请求体：
-  - 200 `{"ok":true,"file":FileItem}`（同步执行，耗时随文件大小与网络变化）；
+  - 200 `{"ok":true,"file":FileItem,"run":Run}`（同步执行，耗时随文件大小与网络变化）；
   - 400 文件名非法，或 SMB 未启用/配置无效；
   - 404 文件不存在；
-  - 502 `{"error":"SMB 上传失败（本地 tar 已保留）: …"}`，本地归档不会被删除。
+  - 502 `{"error":"…","run":Run}` 上传失败（含原因，本地 tar 保留）；
+  - 每次调用都会写入一条运行记录（`trigger: "upload"`，`phase: "uploading"` → `done`），因此手动补传同样出现在运行记录列表与 SSE 事件流中。
 
 ## 设置
 

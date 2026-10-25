@@ -28,6 +28,8 @@ const (
 	TriggerManual   = "manual"
 	TriggerSchedule = "schedule"
 	TriggerCheck    = "check"
+	// TriggerUpload is a manual SMB upload of an archive that already exists.
+	TriggerUpload = "upload"
 )
 
 // Run phases, reported in Run.Phase while the run is in progress.
@@ -125,7 +127,7 @@ type Run struct {
 	TaskName string `json:"taskName"`
 	Image    string `json:"image"`
 	Platform string `json:"platform"`
-	Trigger  string `json:"trigger"` // manual | schedule | check
+	Trigger  string `json:"trigger"` // manual | schedule | check | upload
 	Status   string `json:"status"`  // running | success | skipped | error | canceled
 	Phase    string `json:"phase"`
 

@@ -578,9 +578,17 @@ func (s *Scheduler) uploadTar(ctx context.Context, runID, path string) error {
 	}
 	s.updateRun(runID, func(r *model.Run) { r.Phase = model.PhaseUploading })
 	s.logRun(runID, model.LevelInfo, "SMB 正在上传 %s 到 %s", filepath.Base(path), cfg.Share)
-	// 按 25% 步进记录进度，避免日志被刷屏。
+	if err := remote.UploadWithProgress(ctx, cfg, path, s.uploadProgress(runID)); err != nil {
+		return err
+	}
+	s.logRun(runID, model.LevelInfo, "SMB 上传完成：%s", filepath.Base(path))
+	return nil
+}
+
+// uploadProgress reports SMB progress in 25% steps to keep logs readable.
+func (s *Scheduler) uploadProgress(runID string) remote.ProgressFunc {
 	next := int64(25)
-	progress := func(copied, total int64) {
+	return func(copied, total int64) {
 		if total <= 0 {
 			return
 		}
@@ -594,11 +602,52 @@ func (s *Scheduler) uploadTar(ctx context.Context, runID, path string) error {
 			next += 25
 		}
 	}
-	if err := remote.UploadWithProgress(ctx, cfg, path, progress); err != nil {
-		return err
+}
+
+// UploadArchive publishes an existing archive to the configured SMB share and
+// records the attempt as a run, so manual uploads also show up in the history.
+func (s *Scheduler) UploadArchive(ctx context.Context, f store.TarFile, path string) (model.Run, error) {
+	run, err := s.store.CreateRun(model.Run{
+		TaskID:    f.TaskID,
+		TaskName:  f.TaskName,
+		Image:     f.Image,
+		Trigger:   model.TriggerUpload,
+		Status:    model.RunStatusRunning,
+		Phase:     model.PhaseUploading,
+		StartedAt: time.Now(),
+		TarName:   f.Name,
+		TarSize:   f.Size,
+	})
+	if err != nil {
+		return model.Run{}, err
 	}
-	s.logRun(runID, model.LevelInfo, "SMB 上传完成：%s", filepath.Base(path))
-	return nil
+	cfg := s.store.SnapshotSettings().SMB
+	s.logRun(run.ID, model.LevelInfo, "开始手动上传 SMB：%s（%s）到 %s",
+		f.Name, humanBytes(f.Size), cfg.Share)
+	if !cfg.Enabled {
+		msg := "SMB 上传未启用，请先在设置页填写共享信息"
+		s.logRun(run.ID, model.LevelError, "%s", msg)
+		s.finishRun(run.ID, model.RunStatusError, msg, nil, time.Now())
+		if done, ok := s.store.GetRun(run.ID); ok {
+			return done, fmt.Errorf("%s", msg)
+		}
+		return run, fmt.Errorf("%s", msg)
+	}
+	if err := remote.UploadWithProgress(ctx, cfg, path, s.uploadProgress(run.ID)); err != nil {
+		msg := "SMB 上传失败（本地 tar 已保留）: " + err.Error()
+		s.logRun(run.ID, model.LevelError, "%s", msg)
+		s.finishRun(run.ID, model.RunStatusError, msg, nil, time.Now())
+		if done, ok := s.store.GetRun(run.ID); ok {
+			return done, fmt.Errorf("%s", msg)
+		}
+		return run, fmt.Errorf("%s", msg)
+	}
+	s.logRun(run.ID, model.LevelInfo, "SMB 上传完成：%s", f.Name)
+	s.finishRun(run.ID, model.RunStatusSuccess, "", nil, time.Now())
+	if done, ok := s.store.GetRun(run.ID); ok {
+		return done, nil
+	}
+	return run, nil
 }
 
 // humanBytes renders a byte count for progress log lines.

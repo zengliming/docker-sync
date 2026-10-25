@@ -39,6 +39,12 @@ type fakeScheduler struct {
 	running   int
 	started   bool
 	syncCalls int
+
+	uploadRun   model.Run
+	uploadErr   error
+	uploadCalls int
+	uploadFile  store.TarFile
+	uploadPath  string
 }
 
 func (f *fakeScheduler) TriggerSync(taskID, trigger string, force bool) (model.Run, error) {
@@ -59,6 +65,28 @@ func (f *fakeScheduler) CheckNow(_ context.Context, _ string) (scheduler.CheckRe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.check, f.checkErr
+}
+
+func (f *fakeScheduler) UploadArchive(_ context.Context, item store.TarFile, path string) (model.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.uploadCalls++
+	f.uploadFile = item
+	f.uploadPath = path
+	run := f.uploadRun
+	run.TaskID = item.TaskID
+	run.TaskName = item.TaskName
+	run.Image = item.Image
+	run.Trigger = model.TriggerUpload
+	run.TarName = item.Name
+	run.TarSize = item.Size
+	if f.uploadErr != nil {
+		run.Status = model.RunStatusError
+		run.Error = f.uploadErr.Error()
+		return run, f.uploadErr
+	}
+	run.Status = model.RunStatusSuccess
+	return run, nil
 }
 
 func (f *fakeScheduler) TaskChanged(taskID string) {
@@ -774,13 +802,7 @@ func TestUploadFileSMBEndpoint(t *testing.T) {
 		t.Fatalf("put settings status = %d, body %s", rec.Code, rec.Body.String())
 	}
 
-	var uploadedPath string
-	var uploadedCfg model.SMBSettings
-	env.srv.uploadSMB = func(_ context.Context, cfg model.SMBSettings, path string) error {
-		uploadedCfg = cfg
-		uploadedPath = path
-		return nil
-	}
+	env.sched.uploadRun = model.Run{ID: "r_upload001", Status: model.RunStatusSuccess}
 	rec = env.do(t, http.MethodPost, "/api/files/"+name+"/smb", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload status = %d, body %s", rec.Code, rec.Body.String())
@@ -788,30 +810,41 @@ func TestUploadFileSMBEndpoint(t *testing.T) {
 	resp := decodeBody[struct {
 		OK   bool           `json:"ok"`
 		File model.FileItem `json:"file"`
+		Run  model.Run      `json:"run"`
 	}](t, rec)
 	if !resp.OK || resp.File.Name != name {
 		t.Fatalf("response = %+v", resp)
 	}
-	if uploadedPath != env.store.TarPath(name) || uploadedCfg.Share != "//nas/backups" || uploadedCfg.Password != "secret" {
-		t.Fatalf("upload args = %q %+v", uploadedPath, uploadedCfg)
+	if resp.Run.ID != "r_upload001" || resp.Run.Trigger != model.TriggerUpload ||
+		resp.Run.Status != model.RunStatusSuccess || resp.Run.TarName != name {
+		t.Fatalf("run response = %+v", resp.Run)
 	}
-	if _, err := os.Stat(uploadedPath); err != nil {
+	if env.sched.uploadPath != env.store.TarPath(name) || env.sched.uploadFile.Name != name {
+		t.Fatalf("upload args = %q %+v", env.sched.uploadPath, env.sched.uploadFile)
+	}
+	if _, err := os.Stat(env.sched.uploadPath); err != nil {
 		t.Fatal("local archive removed")
 	}
 
-	env.srv.uploadSMB = func(context.Context, model.SMBSettings, string) error {
-		return errors.New("connection refused")
-	}
+	env.sched.uploadErr = errors.New("SMB 上传失败（本地 tar 已保留）: connection refused")
 	rec = env.do(t, http.MethodPost, "/api/files/"+name+"/smb", "")
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "本地 tar 已保留") {
 		t.Fatalf("failure status = %d, body %s", rec.Code, rec.Body.String())
 	}
-
-	env.srv.uploadSMB = func(context.Context, model.SMBSettings, string) error {
-		t.Fatal("must not upload a missing file")
-		return nil
+	failed := decodeBody[struct {
+		Error string    `json:"error"`
+		Run   model.Run `json:"run"`
+	}](t, rec)
+	if failed.Run.Status != model.RunStatusError || failed.Run.ID != "r_upload001" {
+		t.Fatalf("failed run response = %+v", failed.Run)
 	}
+
+	env.sched.uploadErr = nil
+	calls := env.sched.uploadCalls
 	if rec := env.do(t, http.MethodPost, "/api/files/missing.tar/smb", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing file status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if env.sched.uploadCalls != calls {
+		t.Fatal("must not upload a missing file")
 	}
 }

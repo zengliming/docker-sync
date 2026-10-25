@@ -18,7 +18,6 @@ import (
 
 	"docker-sync/internal/cas"
 	"docker-sync/internal/model"
-	"docker-sync/internal/remote"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
 	"docker-sync/internal/webui"
@@ -28,6 +27,8 @@ import (
 type SchedulerAPI interface {
 	TriggerSync(taskID, trigger string, force bool) (model.Run, error)
 	CheckNow(ctx context.Context, taskID string) (scheduler.CheckResult, error)
+	// UploadArchive copies an existing archive to the SMB share and records a run.
+	UploadArchive(ctx context.Context, f store.TarFile, path string) (model.Run, error)
 	TaskChanged(taskID string)
 	TaskDeleted(taskID string)
 	SettingsChanged()
@@ -60,9 +61,6 @@ type Server struct {
 	startedAt time.Time
 	log       *slog.Logger
 	hub       *Hub
-
-	// uploadSMB publishes an archive to the configured share; replaceable in tests.
-	uploadSMB func(ctx context.Context, cfg model.SMBSettings, path string) error
 }
 
 // New builds the API server and connects the store event notifier to the SSE
@@ -90,7 +88,6 @@ func New(opts Options) (*Server, error) {
 		version:   opts.Version,
 		startedAt: opts.StartedAt,
 		log:       logger,
-		uploadSMB: remote.Upload,
 	}
 	if s.version == "" {
 		s.version = "dev"

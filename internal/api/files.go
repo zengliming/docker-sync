@@ -53,7 +53,8 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 // handleUploadFileSMB copies one existing archive to the configured SMB share.
 //
-// 手动触发，复用与定时同步相同的上传实现；本地 tar 不会被删除。
+// 手动触发，复用与定时同步相同的上传实现；本地 tar 不会被删除。每次上传都会
+// 生成一条运行记录（trigger=upload），因此在运行记录页面可以看到进度与结果。
 func (s *Server) handleUploadFileSMB(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !store.ValidTarName(name) {
@@ -74,13 +75,17 @@ func (s *Server) handleUploadFileSMB(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "SMB 配置无效: %v", err)
 		return
 	}
-	if err := s.uploadSMB(r.Context(), cfg, s.store.TarPath(name)); err != nil {
-		s.log.Warn("手动上传 SMB 失败", "file", name, "share", cfg.Share, "error", err)
-		writeError(w, http.StatusBadGateway, "SMB 上传失败（本地 tar 已保留）: %v", err)
+	run, err := s.sched.UploadArchive(r.Context(), item, s.store.TarPath(name))
+	if err != nil {
+		s.log.Warn("手动上传 SMB 失败", "file", name, "share", cfg.Share, "run", run.ID, "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": err.Error(),
+			"run":   run,
+		})
 		return
 	}
-	s.log.Info("手动上传 SMB 完成", "file", name, "share", cfg.Share)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file": item})
+	s.log.Info("手动上传 SMB 完成", "file", name, "share", cfg.Share, "run", run.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file": item, "run": run})
 }
 
 // handleDeleteFile removes a tar artifact from disk and from the index.

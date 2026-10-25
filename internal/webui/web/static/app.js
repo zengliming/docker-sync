@@ -23,7 +23,7 @@
   const RUN_STATUS = { running: '运行中', success: '成功', skipped: '已跳过', error: '失败', canceled: '已取消' };
   const RUN_STATUS_CLASS = { running: 'badge-run', success: 'badge-ok', skipped: 'badge-skip', error: 'badge-error', canceled: 'badge-idle' };
 
-  const TRIGGER_TEXT = { manual: '手动', schedule: '定时', check: '检查' };
+  const TRIGGER_TEXT = { manual: '手动', schedule: '定时', check: '检查', upload: '上传' };
   const PHASE_TEXT = { queued: '排队', resolving: '解析清单', downloading: '下载层', packing: '打包', uploading: '上传 SMB', done: '完成' };
   const LEVEL_TEXT = { info: 'INFO', warn: 'WARN', error: 'ERROR' };
 
@@ -1983,14 +1983,22 @@
     const name = button.getAttribute('data-name');
     if (!name) return;
     setBusy(button, true, '上传中…');
+    let run = null;
     try {
       const res = await api('/api/files/' + encodeURIComponent(name) + '/smb', { method: 'POST' });
-      const share = res && res.file && res.file.name ? res.file.name : name;
-      toast('已上传到 SMB 共享：' + share, 'success');
+      run = res && res.run ? res.run : null;
+      toast('已上传到 SMB 共享：' + name, 'success');
     } catch (err) {
+      run = err && err.body && err.body.run ? err.body.run : null;
       toast(err.message, 'error');
     } finally {
       setBusy(button, false);
+      // 手动上传同样会写入运行记录，这里同步刷新，方便立刻在「运行记录」里查看。
+      loadRuns(true);
+      loadOverview(true);
+      if (run && run.id) {
+        openRunDrawer(run.id);
+      }
     }
   }
 

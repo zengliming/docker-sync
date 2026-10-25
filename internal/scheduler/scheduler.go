@@ -690,6 +690,8 @@ func triggerLabel(trigger string) string {
 		return "定时同步"
 	case model.TriggerCheck:
 		return "手动检查"
+	case model.TriggerUpload:
+		return "手动上传 SMB"
 	default:
 		return "手动同步"
 	}
