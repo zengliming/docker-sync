@@ -46,6 +46,45 @@ Dockerfile 采用两阶段构建：
 
 `.dockerignore` 已排除 `data/`、`bin/`、`*.tar`、`.git/`、`node_modules/` 等，构建上下文很小。
 
+### 2.1 构建时无法访问 Docker Hub
+
+`docker build` 需要拉取两个基础镜像（`golang:1.25-alpine`、`alpine:3.22`），并在构建阶段访问
+apk 源与 Go module 源。无法直连 Docker Hub 时典型报错：
+
+```
+ERROR: failed to resolve source metadata for docker.io/library/golang:1.25-alpine: ... EOF
+```
+
+Dockerfile 刻意**不使用** `# syntax=docker/dockerfile:1`（该指令会让 BuildKit 先去拉
+`docker.io/docker/dockerfile:1` frontend 镜像，纯内网/受限网络下会直接失败），并把基础镜像、
+apk 源、GOPROXY 都做成了 build-arg：
+
+| build-arg | 默认值 | 说明 |
+| --- | --- | --- |
+| `GO_IMAGE` | `docker.io/library/golang:1.25-alpine` | 构建阶段基础镜像 |
+| `RUNTIME_IMAGE` | `docker.io/library/alpine:3.22` | 运行阶段基础镜像 |
+| `GOPROXY` | `https://proxy.golang.org,direct` | Go module 代理，国内可换 `https://goproxy.cn,direct` |
+| `APK_MIRROR` | 空（官方源） | 运行阶段 apk 源前缀，如 `https://mirrors.aliyun.com/alpine` |
+| `VERSION` | `0.1.0` | 注入 `main.version` |
+
+```bash
+docker build \
+  --build-arg GO_IMAGE=docker.m.daocloud.io/library/golang:1.25-alpine \
+  --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.22 \
+  --build-arg APK_MIRROR=https://mirrors.aliyun.com/alpine \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  -t docker-sync:local .
+```
+
+compose 场景用同名环境变量覆盖（`docker-compose.yml` 已把它们接成 `${GO_IMAGE:-...}`）：
+`GO_IMAGE=... RUNTIME_IMAGE=... docker compose up -d --build`。
+
+另一种更省事的做法：给 Docker daemon 配 `registry-mirrors`（`/etc/docker/daemon.json`），
+之后所有拉取自动走镜像站，构建命令保持原样。
+
+若基础镜像已在本地（`docker images` 能看到 `golang:1.25-alpine` 与 `alpine:3.22`），
+不加 `--pull` 时构建会直接复用本地镜像，无需联网。
+
 ## 3. 运行容器
 
 ### 3.1 docker compose（推荐）

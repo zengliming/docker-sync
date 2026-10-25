@@ -123,6 +123,42 @@ docker compose up -d --build
 > `docker run -d --name docker-sync -p 8080:8080 -v "$PWD/data:/data" docker-sync:local`。
 > 需要显式传入环境变量时见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
+#### 构建时连不上 Docker Hub
+
+`docker build` 需要拉取 `golang:1.25-alpine` 与 `alpine:3.22` 两个基础镜像（以及 apk 源与
+Go module 源）。国内网络常见报错：
+
+```
+ERROR: failed to resolve source metadata for docker.io/library/golang:1.25-alpine: ... EOF
+# 或旧版 Dockerfile 里的 frontend 镜像
+ERROR: failed to resolve source metadata for docker.io/docker/dockerfile:1: ... EOF
+```
+
+本项目 Dockerfile **不使用** `# syntax=docker/dockerfile:1`（该指令会额外拉 frontend 镜像），
+且基础镜像、apk 源、GOPROXY 全部可用 build-arg 覆盖：
+
+```bash
+docker build \
+  --build-arg GO_IMAGE=docker.m.daocloud.io/library/golang:1.25-alpine \
+  --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.22 \
+  --build-arg APK_MIRROR=https://mirrors.aliyun.com/alpine \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  -t docker-sync:local .
+```
+
+Compose 下用同名环境变量即可（`docker compose up -d --build` 前导出）：
+
+```bash
+export GO_IMAGE=docker.m.daocloud.io/library/golang:1.25-alpine
+export RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.22
+export APK_MIRROR=https://mirrors.aliyun.com/alpine
+export GOPROXY=https://goproxy.cn,direct
+docker compose up -d --build
+```
+
+也可以给 Docker daemon 配置镜像加速（`/etc/docker/daemon.json` 的 `registry-mirrors`），
+这样所有 `docker pull` / `docker build` 都会自动走镜像站，无需逐个传参。
+
 ### 方式二：本机直接运行（开发/调试）
 
 要求：Go 1.25+（项目 `go.mod` 为 `go 1.25`，更新版本的 Go 也可构建）。

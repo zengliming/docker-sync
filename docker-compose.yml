@@ -16,9 +16,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # 可选：覆盖镜像内注入的版本号
-      # args:
-      #   VERSION: "0.1.0"
+      # 基础镜像与依赖源可用环境变量指向镜像站（无法直连 Docker Hub 时）：
+      #   GO_IMAGE=docker.m.daocloud.io/library/golang:1.25-alpine \
+      #   RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.22 \
+      #   APK_MIRROR=https://mirrors.aliyun.com/alpine \
+      #   docker compose up -d --build
+      args:
+        GO_IMAGE: "${GO_IMAGE:-docker.io/library/golang:1.25-alpine}"
+        RUNTIME_IMAGE: "${RUNTIME_IMAGE:-docker.io/library/alpine:3.22}"
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+        APK_MIRROR: "${APK_MIRROR:-}"
+        # 可选：覆盖镜像内注入的版本号
+        VERSION: "${VERSION:-0.1.0}"
     image: docker-sync:local
     ports:
       - "8080:8080"
