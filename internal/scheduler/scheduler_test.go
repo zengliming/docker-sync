@@ -410,3 +410,34 @@ func TestProgressCountsOnlyNetworkBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckRunLeavesTaskIdle guards task.status after a check-only run: the
+// check sets running while it resolves and must hand the task back to idle
+// when the digest is unchanged, so the UI stops offering "同步中".
+func TestCheckRunLeavesTaskIdle(t *testing.T) {
+	env := newSchedEnv(t)
+	created := env.createTask(nil)
+	env.store.PatchTask(created.ID, func(task *model.Task) {
+		task.LastDigest = testDigest
+		task.LastError = "旧的失败信息"
+	})
+
+	run, err := env.sched.StartCheck(created.ID, model.TriggerManual)
+	if err != nil {
+		t.Fatalf("StartCheck: %v", err)
+	}
+	done := env.waitRunDone(run.ID)
+	if done.Status != model.RunStatusSuccess {
+		t.Fatalf("run status = %s, want success", done.Status)
+	}
+	if env.fake.downloadCount() != 0 {
+		t.Fatal("check-only run must not download blobs")
+	}
+	task, _ := env.store.GetTask(created.ID)
+	if task.Status != model.TaskStatusIdle {
+		t.Fatalf("task status after check = %q, want idle", task.Status)
+	}
+	if task.LastError != "" || task.UpdateAvailable {
+		t.Fatalf("task after check = %+v", task)
+	}
+}

@@ -29,6 +29,22 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 - **状态持久化**：`state.json` 原子写入（临时文件 + fsync + rename），异常退出后可恢复；损坏时自动备份为 `state.json.broken` 并以默认设置启动。
 - **SSE 实时刷新**：前端通过 `/api/events` 接收任务/运行/文件/设置变更事件。
 
+## 界面预览
+
+内嵌 Web 控制台（1440×940 实拍，深色主题），五个页面 + 新建任务表单：
+
+| 仪表盘 | 任务 |
+| --- | --- |
+| ![仪表盘](docs/screenshots/dashboard.png) | ![任务](docs/screenshots/tasks.png) |
+
+| 运行记录 | 文件 |
+| --- | --- |
+| ![运行记录](docs/screenshots/runs.png) | ![文件](docs/screenshots/files.png) |
+
+| 设置 | 新建任务 |
+| --- | --- |
+| ![设置](docs/screenshots/settings.png) | ![新建任务](docs/screenshots/task-modal.png) |
+
 ## 架构简述
 
 ```

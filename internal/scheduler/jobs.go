@@ -421,9 +421,11 @@ func (s *Scheduler) performCheck(ctx context.Context, runID string, task model.T
 		t.LastRunID = runID
 		if !changed {
 			t.LastError = ""
-			if t.Status == model.TaskStatusError {
-				t.Status = model.TaskStatusIdle
-			}
+		}
+		// The check run itself is over, so the task must not stay "running"
+		// (a follow-up sync, if any, re-queues it). Paused is sticky.
+		if t.Status != model.TaskStatusPaused {
+			t.Status = model.TaskStatusIdle
 		}
 	})
 	s.finishRun(runID, model.RunStatusSuccess, "", func(r *model.Run) {
