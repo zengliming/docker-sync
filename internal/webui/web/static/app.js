@@ -15,7 +15,7 @@
   };
 
   const PLATFORM_PRESETS = ['linux/amd64', 'linux/arm64', 'linux/arm/v7'];
-  const PHASE_ORDER = ['queued', 'resolving', 'downloading', 'packing', 'done'];
+  const PHASE_ORDER = ['queued', 'resolving', 'downloading', 'packing', 'uploading', 'done'];
 
   const TASK_STATUS = { idle: '空闲', queued: '排队中', running: '同步中', error: '错误', paused: '已暂停' };
   const TASK_STATUS_CLASS = { idle: 'badge-idle', queued: 'badge-warn', running: 'badge-run', error: 'badge-error', paused: 'badge-paused' };
@@ -24,7 +24,7 @@
   const RUN_STATUS_CLASS = { running: 'badge-run', success: 'badge-ok', skipped: 'badge-skip', error: 'badge-error', canceled: 'badge-idle' };
 
   const TRIGGER_TEXT = { manual: '手动', schedule: '定时', check: '检查' };
-  const PHASE_TEXT = { queued: '排队', resolving: '解析清单', downloading: '下载层', packing: '打包', done: '完成' };
+  const PHASE_TEXT = { queued: '排队', resolving: '解析清单', downloading: '下载层', packing: '打包', uploading: '上传 SMB', done: '完成' };
   const LEVEL_TEXT = { info: 'INFO', warn: 'WARN', error: 'ERROR' };
 
   const ICONS = {
@@ -521,6 +521,7 @@
       };
     }) : [];
     return {
+      smb: Object.assign({ enabled: false, share: '', directory: '', username: '', password: '', hasPassword: false, domain: '' }, d.smb || {}, { password: '' }),
       defaultPlatform: typeof d.defaultPlatform === 'string' ? d.defaultPlatform : '',
       proxyUrl: typeof d.proxyUrl === 'string' ? d.proxyUrl : '',
       noProxy: typeof d.noProxy === 'string' ? d.noProxy : '',
@@ -582,7 +583,7 @@
       case 'dashboard': loadOverview(silent); break;
       case 'tasks': loadTasks(silent); break;
       case 'runs': loadRuns(silent); break;
-      case 'files': loadFiles(silent); break;
+      case 'files': loadFiles(silent); ensureSettingsForFiles(); break;
       case 'settings': loadSettings(silent, false); break;
       default: break;
     }
@@ -1060,6 +1061,13 @@
           '<td>' + imageCell + '</td>' +
           '<td><div class="row-actions">' +
           '<a class="btn btn-sm btn-ghost" href="' + esc(fileUrl(file)) + '" download="' + esc(file.name) + '">下载</a>' +
+          btn('上传 SMB', 'file-smb', {
+            data: { name: file.name },
+            cls: 'btn-ghost',
+            size: 'sm',
+            title: smbReady() ? '把该 tar 复制到已配置的 SMB 共享' : '请先在设置页启用 SMB 远端存储',
+            disabled: !smbReady()
+          }) +
           btn('删除', 'file-delete', { data: { name: file.name }, cls: 'btn-danger', size: 'sm' }) +
           '</div></td>' +
           '</tr>';
@@ -1193,6 +1201,24 @@
     setProxyTestResult();
   }
 
+  function smbSettingsHtml(d) {
+    const cfg = d.smb || {};
+    let html = '<section class="card card-pad"><div class="card-head"><h3>SMB 远端存储</h3><p>tar 校验后自动上传，本地副本保留。目标目录须预先创建；远端文件不随本地清理删除。</p></div>';
+    html += '<label><input type="checkbox" name="smbEnabled"' + (cfg.enabled ? ' checked' : '') + '> 启用 SMB 上传</label><div class="settings-grid">';
+    [['share', '共享地址', '//192.168.1.10/backups'], ['directory', '共享内目录（可空）', 'docker-images'], ['username', '用户名', ''], ['password', '密码', cfg.hasPassword ? '已设置，留空保留；更换共享或账号须重填' : ''], ['domain', '域（可空）', 'WORKGROUP']].forEach(function (f) {
+      html += '<div class="field"><label for="smb-' + f[0] + '">' + f[1] + '</label><input class="input" id="smb-' + f[0] + '" name="smb-' + f[0] + '" type="' + (f[0] === 'password' ? 'password' : 'text') + '" autocomplete="off" placeholder="' + esc(f[2]) + '" value="' + esc(cfg[f[0]] || '') + '"></div>';
+    });
+    return html + '</div><span class="field-hint">凭据保存在服务端 state.json；请限制数据目录访问权限。上传失败保留本地 tar，下次同步会重试。</span></section>';
+  }
+
+  function captureSMB(form, previous) {
+    const cfg = { enabled: !!form.querySelector('[name="smbEnabled"]').checked, hasPassword: !!(previous && previous.hasPassword) };
+    ['share', 'directory', 'username', 'password', 'domain'].forEach(function (key) {
+      cfg[key] = form.querySelector('[name="smb-' + key + '"]').value;
+    });
+    return cfg;
+  }
+
   function renderSettings() {
     const head = pageHead('设置', '服务参数、缓存策略与仓库凭据', btn('刷新', 'refresh', { cls: 'btn-ghost' }));
 
@@ -1213,7 +1239,7 @@
       '<span class="field-hint">新建任务未指定平台时使用。</span></div>';
 
     const form = '<form data-form="settings" novalidate>' +
-      '<div class="settings-stack">' +
+      '<div class="settings-stack">' + smbSettingsHtml(d) +
       '<section class="card card-pad">' +
       '<div class="card-head"><h3>基础设置</h3><p>影响调度、下载并发与 blob 缓存清理策略。</p></div>' +
       '<div class="settings-grid">' +
@@ -1422,7 +1448,7 @@
     } else if (type === 'file') {
       loadFiles(true);
       loadOverview(true);
-    } else if (type === 'settings') {
+    } else if (type === 'settings' && state.route !== 'settings') {
       loadSettings(true, false);
     }
     /* 日志行通过 2 秒轮询获取，避免高频刷新请求轰炸后端 */
@@ -1704,6 +1730,8 @@
       if (input) draft[key] = input.value;
     });
 
+    draft.smb = captureSMB(form, draft.smb);
+
     ['proxyUrl', 'noProxy'].forEach(function (key) {
       const input = form.querySelector('[name="' + key + '"]');
       if (input) draft[key] = input.value;
@@ -1766,6 +1794,7 @@
         blobCacheMaxAgeDays: 0,
         proxyUrl: String(fd.get('proxyUrl') || '').trim(),
         noProxy: String(fd.get('noProxy') || '').trim(),
+        smb: captureSMB(form, state.settingsDraft.smb),
         registries: []
       };
       numberFields.forEach(function (field) {
@@ -1930,6 +1959,41 @@
     }
   }
 
+  // smbReady reports whether SMB upload is enabled in the saved settings.
+  function smbReady() {
+    return !!(state.settings && state.settings.smb && state.settings.smb.enabled);
+  }
+
+  // ensureSettingsForFiles loads /api/settings once so the files page can tell
+  // whether the "上传 SMB" action is usable.
+  async function ensureSettingsForFiles() {
+    if (state.settings || state.smbLoading) return;
+    state.smbLoading = true;
+    try {
+      state.settings = await api('/api/settings');
+    } catch (err) {
+      state.smbLoading = false;
+      return;
+    }
+    state.smbLoading = false;
+    renderIfActive('files');
+  }
+
+  async function uploadFileSMB(button) {
+    const name = button.getAttribute('data-name');
+    if (!name) return;
+    setBusy(button, true, '上传中…');
+    try {
+      const res = await api('/api/files/' + encodeURIComponent(name) + '/smb', { method: 'POST' });
+      const share = res && res.file && res.file.name ? res.file.name : name;
+      toast('已上传到 SMB 共享：' + share, 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function deleteFile(button) {
     const name = button.getAttribute('data-name');
     if (!name) return;
@@ -2013,6 +2077,9 @@
         }
         break;
       }
+      case 'file-smb':
+        await uploadFileSMB(el);
+        break;
       case 'file-delete':
         await deleteFile(el);
         break;
@@ -2114,7 +2181,8 @@
     /* SSE 之外的 15 秒兜底轮询：健康状态 + 当前页数据 */
     window.setInterval(function () {
       loadHealth();
-      loadRouteData(state.route, true);
+      // Keep the settings form stable while the user is editing.
+      if (state.route !== 'settings') loadRouteData(state.route, true);
     }, 15000);
   }
 

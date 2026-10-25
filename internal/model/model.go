@@ -36,6 +36,7 @@ const (
 	PhaseResolving   = "resolving"
 	PhaseDownloading = "downloading"
 	PhasePacking     = "packing"
+	PhaseUploading   = "uploading"
 	PhaseDone        = "done"
 )
 
@@ -162,13 +163,25 @@ type RegistryAuth struct {
 	ProxyURL string `json:"proxyUrl,omitempty"`
 }
 
+// SMBSettings configures automatic remote archive copies.
+type SMBSettings struct {
+	Enabled     bool   `json:"enabled"`
+	Share       string `json:"share"`
+	Directory   string `json:"directory"`
+	Username    string `json:"username"`
+	Password    string `json:"password,omitempty"`
+	HasPassword bool   `json:"hasPassword"`
+	Domain      string `json:"domain"`
+}
+
 // Settings is the global service configuration.
 type Settings struct {
-	DefaultPlatform        string `json:"defaultPlatform"`
-	MaxConcurrentRuns      int    `json:"maxConcurrentRuns"`
-	MaxConcurrentDownloads int    `json:"maxConcurrentDownloads"`
-	BlobCacheMaxGB         int    `json:"blobCacheMaxGB"`
-	BlobCacheMaxAgeDays    int    `json:"blobCacheMaxAgeDays"`
+	SMB                    SMBSettings `json:"smb"`
+	DefaultPlatform        string      `json:"defaultPlatform"`
+	MaxConcurrentRuns      int         `json:"maxConcurrentRuns"`
+	MaxConcurrentDownloads int         `json:"maxConcurrentDownloads"`
+	BlobCacheMaxGB         int         `json:"blobCacheMaxGB"`
+	BlobCacheMaxAgeDays    int         `json:"blobCacheMaxAgeDays"`
 	// ProxyURL is the outbound proxy for registry requests, e.g.
 	// "http://127.0.0.1:7890" or "socks5://127.0.0.1:7890". Empty means
 	// "use the HTTP_PROXY/HTTPS_PROXY environment variables".

@@ -202,6 +202,11 @@
 - `GET /api/files/{name}` → 200，`Content-Type: application/x-tar`，
   `Content-Disposition: attachment; filename="<name>"`，文件不存在 404，非法文件名 400。
 - `DELETE /api/files/{name}` → `{"ok":true}`，非法/不存在 404/400。
+- `POST /api/files/{name}/smb` → 手动把该 tar 复制到已配置的 SMB 共享，无请求体：
+  - 200 `{"ok":true,"file":FileItem}`（同步执行，耗时随文件大小与网络变化）；
+  - 400 文件名非法，或 SMB 未启用/配置无效；
+  - 404 文件不存在；
+  - 502 `{"error":"SMB 上传失败（本地 tar 已保留）: …"}`，本地归档不会被删除。
 
 ## 设置
 
@@ -278,3 +283,32 @@
 | 409 | 任务已有正在运行的同步 |
 | 502 | 访问镜像仓库失败（网络、鉴权、digest 校验等） |
 | 500 | 服务内部错误 |
+
+
+## SMB 远端存储
+
+在「设置 → SMB 远端存储」启用自动上传，填写共享地址（例如 `//192.168.1.10/backups`）、共享内相对目录（例如 `docker-images`）、用户名、密码和可选域。目标目录须预先创建，并赋予账号写入、重命名及删除临时文件的权限。使用 SMB2/SMB3，无需挂载共享或授予容器特权。
+
+容器镜像不需要安装 `samba-client`：上传使用内置的纯 Go SMB2/SMB3 客户端，只要求容器能出站访问共享主机的 445 端口；直接运行二进制时同样无需额外依赖。
+
+tar 在本地生成并校验后，进入 `uploading` 阶段；上传到唯一 `.part` 临时文件，完成后重命名为原 tar 文件名，同名远端文件会替换。失败会记录运行错误并保留本地 tar，下次手动或定时同步重试；镜像 digest 不变时也会重新上传已有 tar。仅「检查更新」不会上传文件。启用前已有文件可在「文件」页对单个 tar 点击「上传 SMB」手动补传（`POST /api/files/{name}/smb`）。
+
+远端副本不随本地版本清理而删除，请在 NAS 上单独设置保留策略。密码与仓库凭据一样保存在数据目录的 `state.json`，读取设置接口不返回密码。更换共享地址、用户名或域后需重新填写密码。
+
+`GET/PUT /api/settings` 新增 `smb` 对象（默认禁用）。PUT 时与其他设置一起提交：
+
+```json
+{
+  "smb": {
+    "enabled": true,
+    "share": "//192.168.1.10/backups",
+    "directory": "docker-images",
+    "username": "backup",
+    "password": "your-password",
+    "hasPassword": false,
+    "domain": ""
+  }
+}
+```
+
+GET 隐藏 `password`，通过 `hasPassword` 标记是否已设置。空密码且 `hasPassword: true` 仅在共享、用户名、域均未改变时保留密码；`hasPassword: false` 配合空密码可清除密码。目录必须为相对路径，不允许 `..`、反斜杠、引号或控制字符。上传失败时运行状态为 `error`，本地文件保留。

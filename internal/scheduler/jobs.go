@@ -11,6 +11,7 @@ import (
 
 	"docker-sync/internal/model"
 	"docker-sync/internal/registry"
+	"docker-sync/internal/remote"
 	"docker-sync/internal/save"
 	"docker-sync/internal/store"
 )
@@ -183,6 +184,12 @@ func (s *Scheduler) executeSync(j *job) {
 	// Optimisation: identical digest and the previous tar still on disk.
 	skip := !j.force && task.LastDigest != "" && img.ManifestDigest == task.LastDigest
 	if skip && task.LatestTar != "" && s.store.HasTar(task.LatestTar) {
+		if err := s.uploadTar(ctx, j.runID, filepath.Join(s.store.TarsDir(), task.LatestTar)); err != nil {
+			if !s.canceled(ctx, j) {
+				s.failRun(j.runID, j.taskID, "SMB 上传失败（本地 tar 已保留）", err)
+			}
+			return
+		}
 		now := time.Now()
 		s.logRun(j.runID, model.LevelInfo, "镜像无变化（digest %s），跳过下载", shortDigest(img.ManifestDigest))
 		s.finishRun(j.runID, model.RunStatusSkipped, "", func(r *model.Run) {
@@ -289,6 +296,22 @@ func (s *Scheduler) executeSync(j *job) {
 		size = info.Size()
 		modTime = info.ModTime()
 	}
+	s.store.PutTarFile(store.TarFile{
+		Name:     name,
+		Size:     size,
+		ModTime:  modTime,
+		TaskID:   task.ID,
+		TaskName: task.Name,
+		Image:    ref.String(),
+		Digest:   img.ManifestDigest,
+	})
+	if err := s.uploadTar(ctx, j.runID, path); err != nil {
+		s.updateRun(j.runID, func(r *model.Run) { r.TarName = name; r.TarSize = size })
+		if !s.canceled(ctx, j) {
+			s.failRun(j.runID, j.taskID, "SMB 上传失败（本地 tar 已保留）", err)
+		}
+		return
+	}
 	now := time.Now()
 	wasUpdate := task.LastDigest == "" || task.LastDigest != img.ManifestDigest
 	s.store.PatchTask(j.taskID, func(t *model.Task) {
@@ -304,15 +327,7 @@ func (s *Scheduler) executeSync(j *job) {
 		t.Status = model.TaskStatusIdle
 		t.LastRunID = j.runID
 	})
-	s.store.PutTarFile(store.TarFile{
-		Name:     name,
-		Size:     size,
-		ModTime:  modTime,
-		TaskID:   task.ID,
-		TaskName: task.Name,
-		Image:    ref.String(),
-		Digest:   img.ManifestDigest,
-	})
+
 	s.finishRun(j.runID, model.RunStatusSuccess, "", func(r *model.Run) {
 		r.RemoteDigest = img.ManifestDigest
 		r.PreviousDigest = task.LastDigest
@@ -553,4 +568,49 @@ func removeQuietly(path string) {
 		// The caller is already reporting a failure; keep this best effort.
 		_ = err
 	}
+}
+
+// uploadTar copies a validated archive before marking the sync successful.
+func (s *Scheduler) uploadTar(ctx context.Context, runID, path string) error {
+	cfg := s.store.SnapshotSettings().SMB
+	if !cfg.Enabled {
+		return nil
+	}
+	s.updateRun(runID, func(r *model.Run) { r.Phase = model.PhaseUploading })
+	s.logRun(runID, model.LevelInfo, "SMB 正在上传 %s 到 %s", filepath.Base(path), cfg.Share)
+	// 按 25% 步进记录进度，避免日志被刷屏。
+	next := int64(25)
+	progress := func(copied, total int64) {
+		if total <= 0 {
+			return
+		}
+		pct := copied * 100 / total
+		if pct < next {
+			return
+		}
+		s.logRun(runID, model.LevelInfo, "SMB 上传进度 %d%%（%s / %s）", pct,
+			humanBytes(copied), humanBytes(total))
+		for next <= pct {
+			next += 25
+		}
+	}
+	if err := remote.UploadWithProgress(ctx, cfg, path, progress); err != nil {
+		return err
+	}
+	s.logRun(runID, model.LevelInfo, "SMB 上传完成：%s", filepath.Base(path))
+	return nil
+}
+
+// humanBytes renders a byte count for progress log lines.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < 5; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

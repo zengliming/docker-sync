@@ -18,6 +18,7 @@ import (
 
 	"docker-sync/internal/cas"
 	"docker-sync/internal/model"
+	"docker-sync/internal/remote"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
 	"docker-sync/internal/webui"
@@ -59,6 +60,9 @@ type Server struct {
 	startedAt time.Time
 	log       *slog.Logger
 	hub       *Hub
+
+	// uploadSMB publishes an archive to the configured share; replaceable in tests.
+	uploadSMB func(ctx context.Context, cfg model.SMBSettings, path string) error
 }
 
 // New builds the API server and connects the store event notifier to the SSE
@@ -86,6 +90,7 @@ func New(opts Options) (*Server, error) {
 		version:   opts.Version,
 		startedAt: opts.StartedAt,
 		log:       logger,
+		uploadSMB: remote.Upload,
 	}
 	if s.version == "" {
 		s.version = "dev"
@@ -135,6 +140,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/files/{name}", s.handleDownloadFile)
+	mux.HandleFunc("POST /api/files/{name}/smb", s.handleUploadFileSMB)
 	mux.HandleFunc("DELETE /api/files/{name}", s.handleDeleteFile)
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)

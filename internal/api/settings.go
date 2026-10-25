@@ -8,6 +8,7 @@ import (
 
 	"docker-sync/internal/model"
 	"docker-sync/internal/registry"
+	"docker-sync/internal/remote"
 )
 
 // handleGetSettings returns the settings with passwords masked.
@@ -38,6 +39,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 
 // validateSettings enforces the ranges documented in the API contract.
 func validateSettings(in model.Settings) error {
+	if err := remote.Validate(in.SMB); err != nil {
+		return err
+	}
 	platform := strings.TrimSpace(in.DefaultPlatform)
 	if platform == "" {
 		return fmt.Errorf("defaultPlatform 不能为空")

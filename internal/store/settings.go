@@ -30,6 +30,8 @@ func (s *Store) GetSettings() model.Settings {
 			out.Registries[i].HasPassword = true
 		}
 	}
+	out.SMB.HasPassword = out.SMB.Password != ""
+	out.SMB.Password = ""
 	out.DataDir = s.dir
 	return out
 }
@@ -102,6 +104,10 @@ func copySettings(in model.Settings) model.Settings {
 
 func mergeSettings(cur, in model.Settings) model.Settings {
 	out := copySettings(in)
+	if out.SMB.Password == "" && out.SMB.HasPassword && out.SMB.Share == cur.SMB.Share && out.SMB.Username == cur.SMB.Username && out.SMB.Domain == cur.SMB.Domain {
+		out.SMB.Password = cur.SMB.Password
+	}
+	out.SMB.HasPassword = out.SMB.Password != ""
 	out.Registries = out.Registries[:0]
 	for i := range in.Registries {
 		next := in.Registries[i]

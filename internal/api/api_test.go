@@ -91,6 +91,7 @@ type testEnv struct {
 	handler http.Handler
 	store   *store.Store
 	sched   *fakeScheduler
+	srv     *Server
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -116,7 +117,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("api.New: %v", err)
 	}
 	t.Cleanup(srv.Close)
-	return &testEnv{handler: srv.Handler(), store: st, sched: fake}
+	return &testEnv{handler: srv.Handler(), store: st, sched: fake, srv: srv}
 }
 
 func (e *testEnv) do(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
@@ -741,5 +742,76 @@ func TestMiddlewareGzipJSONOnly(t *testing.T) {
 	env.handler.ServeHTTP(rec, req.WithContext(ctx))
 	if got := rec.Header().Get("Content-Encoding"); got != "" {
 		t.Fatalf("sse content encoding = %q", got)
+	}
+}
+
+func TestUploadFileSMBEndpoint(t *testing.T) {
+	env := newTestEnv(t)
+	task := decodeBody[taskEnvelope](t, env.do(t, http.MethodPost, "/api/tasks", `{"image":"alpine:3.20"}`))
+
+	const name = "library_alpine_3.20_linux_amd64_abcdef123456.tar"
+	content := []byte("tar-bytes")
+	if err := os.WriteFile(env.store.TarPath(name), content, 0o644); err != nil {
+		t.Fatalf("write tar: %v", err)
+	}
+	env.store.PutTarFile(store.TarFile{
+		Name:     name,
+		Size:     int64(len(content)),
+		ModTime:  time.Now(),
+		TaskID:   task.ID,
+		TaskName: task.Name,
+		Image:    task.Image,
+	})
+
+	rec := env.do(t, http.MethodPost, "/api/files/"+name+"/smb", "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "未启用") {
+		t.Fatalf("disabled smb status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	body := `{"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7,` +
+		`"smb":{"enabled":true,"share":"//nas/backups","directory":"docker","username":"backup","password":"secret"}}`
+	if rec := env.do(t, http.MethodPut, "/api/settings", body); rec.Code != http.StatusOK {
+		t.Fatalf("put settings status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	var uploadedPath string
+	var uploadedCfg model.SMBSettings
+	env.srv.uploadSMB = func(_ context.Context, cfg model.SMBSettings, path string) error {
+		uploadedCfg = cfg
+		uploadedPath = path
+		return nil
+	}
+	rec = env.do(t, http.MethodPost, "/api/files/"+name+"/smb", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeBody[struct {
+		OK   bool           `json:"ok"`
+		File model.FileItem `json:"file"`
+	}](t, rec)
+	if !resp.OK || resp.File.Name != name {
+		t.Fatalf("response = %+v", resp)
+	}
+	if uploadedPath != env.store.TarPath(name) || uploadedCfg.Share != "//nas/backups" || uploadedCfg.Password != "secret" {
+		t.Fatalf("upload args = %q %+v", uploadedPath, uploadedCfg)
+	}
+	if _, err := os.Stat(uploadedPath); err != nil {
+		t.Fatal("local archive removed")
+	}
+
+	env.srv.uploadSMB = func(context.Context, model.SMBSettings, string) error {
+		return errors.New("connection refused")
+	}
+	rec = env.do(t, http.MethodPost, "/api/files/"+name+"/smb", "")
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "本地 tar 已保留") {
+		t.Fatalf("failure status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	env.srv.uploadSMB = func(context.Context, model.SMBSettings, string) error {
+		t.Fatal("must not upload a missing file")
+		return nil
+	}
+	if rec := env.do(t, http.MethodPost, "/api/files/missing.tar/smb", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing file status = %d, body %s", rec.Code, rec.Body.String())
 	}
 }

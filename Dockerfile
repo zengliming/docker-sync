@@ -18,8 +18,8 @@
 #      服务直接通过 Registry v2 HTTP API 拉取 manifest/blob，并自行生成
 #      `docker save` 兼容的 tar；用户把 tar 下载到宿主机后再 `docker load -i`。
 
-ARG GO_IMAGE=docker.io/library/golang:1.25-alpine
-ARG RUNTIME_IMAGE=docker.io/library/alpine:3.22
+ARG GO_IMAGE=golang:1.25-alpine
+ARG RUNTIME_IMAGE=alpine:3.22
 ARG VERSION=0.1.0
 
 # ---------- 构建阶段 ----------
