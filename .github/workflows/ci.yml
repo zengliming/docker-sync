@@ -43,7 +43,17 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test ./...
+        run: |
+          set -o pipefail
+          go test ./... -count=1 2>&1 | tee /tmp/test.log
+
+      - name: 测试失败详情
+        if: failure()
+        run: |
+          echo '### go test 输出（末尾 120 行）' >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 120 /tmp/test.log >> "$GITHUB_STEP_SUMMARY" || true
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: 编译 ${{ matrix.goos }}/${{ matrix.goarch }}
