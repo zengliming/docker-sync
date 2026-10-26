@@ -650,7 +650,10 @@ func TestProxyTestEndpoint(t *testing.T) {
 func TestHealthAndOverview(t *testing.T) {
 	env := newTestEnv(t)
 	health := decodeBody[map[string]any](t, env.do(t, http.MethodGet, "/api/health", ""))
-	if health["status"] != "ok" || health["version"] != "test-version" {
+	// An unstamped build appends the embedded frontend hash so a bare version
+	// number can never be confused with an older binary.
+	version, _ := health["version"].(string)
+	if health["status"] != "ok" || !strings.HasPrefix(version, "test-version+w") || len(version) != len("test-version+w")+10 {
 		t.Fatalf("health = %v", health)
 	}
 	if _, ok := health["uptimeSec"]; !ok {

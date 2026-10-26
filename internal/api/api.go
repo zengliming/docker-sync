@@ -5,6 +5,7 @@ package api
 import (
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,6 +107,16 @@ func New(opts Options) (*Server, error) {
 		s.index = withAssetVersions(index, web)
 	} else {
 		s.log.Warn("未找到前端 index.html", "error", err)
+	}
+	// A build without a stamped git revision (notably `go run ./cmd/server`,
+	// which go does not stamp) would report a bare "0.1.0" and look identical to
+	// an old binary. Fall back to the embedded frontend hash, which is the same
+	// value index.html puts in /static/app.js?v=..., so the running UI can always
+	// be matched against a source revision.
+	if !strings.Contains(s.version, "+") {
+		if sum, ok := assetHash(web, "static/app.js"); ok {
+			s.version += "+w" + hex.EncodeToString(sum[:5])
+		}
 	}
 	if static, err := fs.Sub(web, "static"); err == nil {
 		s.static = static

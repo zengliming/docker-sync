@@ -37,6 +37,17 @@ func withAssetVersions(index []byte, web fs.FS) []byte {
 	})
 }
 
+// assetHash returns the content hash of an embedded asset, matching the ?v=
+// token that withAssetVersions writes into index.html.
+func assetHash(web fs.FS, name string) ([sha256.Size]byte, bool) {
+	var zero [sha256.Size]byte
+	data, err := fs.ReadFile(web, name)
+	if err != nil {
+		return zero, false
+	}
+	return sha256.Sum256(data), true
+}
+
 // handleFrontend serves index.html for "/" and for unknown non /api paths so a
 // hash router never sees a 404 on refresh.
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
