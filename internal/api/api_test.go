@@ -25,6 +25,7 @@ import (
 	"docker-sync/internal/registry"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
+	"docker-sync/internal/tlscert"
 )
 
 // fakeScheduler is a SchedulerAPI double recording the calls the API makes.
@@ -1116,5 +1117,126 @@ func TestMirrorSettingsValidation(t *testing.T) {
 	legacy := decodeBody[model.Settings](t, rec)
 	if legacy.Mirror.Enabled || legacy.Mirror.TagTTLMinutes != 60 || len(legacy.Mirror.Upstreams) != 1 {
 		t.Fatalf("legacy defaults = %+v", legacy.Mirror)
+	}
+}
+
+type tlsStatsBody struct {
+	Scheme string `json:"scheme"`
+	TLS    struct {
+		Enabled  bool     `json:"enabled"`
+		Mode     string   `json:"mode"`
+		SANs     []string `json:"sans"`
+		CAURL    string   `json:"caUrl"`
+		NotAfter string   `json:"notAfter"`
+	} `json:"tls"`
+}
+
+func TestMirrorStatsReportsTLSAndServesCA(t *testing.T) {
+	material, err := tlscert.SelfSigned(tlscert.Options{Dir: t.TempDir(), InterfaceIPs: []string{"192.168.1.10"}})
+	if err != nil {
+		t.Fatalf("SelfSigned: %v", err)
+	}
+	st, err := store.Open(store.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv, err := New(Options{
+		Store:     st,
+		Scheduler: &fakeScheduler{started: true},
+		TLS:       material,
+		WebUI:     fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}},
+		Version:   "test-version",
+	})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	env := &testEnv{handler: srv.Handler(), store: st, sched: &fakeScheduler{}, srv: srv}
+
+	rec := env.do(t, http.MethodGet, "/api/mirror/stats", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	got := decodeBody[tlsStatsBody](t, rec)
+	if !got.TLS.Enabled || got.TLS.Mode != tlscert.ModeSelfSigned {
+		t.Fatalf("tls block = %+v", got.TLS)
+	}
+	if got.TLS.CAURL != "/api/mirror/ca.crt" {
+		t.Fatalf("caUrl = %q", got.TLS.CAURL)
+	}
+	if got.Scheme != "https" {
+		t.Fatalf("scheme = %q, want https", got.Scheme)
+	}
+	if got.TLS.NotAfter == "" {
+		t.Fatal("notAfter missing")
+	}
+	if !strings.Contains(strings.Join(got.TLS.SANs, ","), "192.168.1.10") {
+		t.Fatalf("sans = %v", got.TLS.SANs)
+	}
+
+	ca := env.do(t, http.MethodGet, "/api/mirror/ca.crt", "")
+	if ca.Code != http.StatusOK {
+		t.Fatalf("ca.crt status = %d, body %s", ca.Code, ca.Body.String())
+	}
+	if ct := ca.Header().Get("Content-Type"); ct != "application/x-pem-file" {
+		t.Fatalf("content type = %q", ct)
+	}
+	if !bytes.Equal(ca.Body.Bytes(), material.CAPEM) {
+		t.Fatal("下载的 CA 与生成的不一致")
+	}
+	if !strings.Contains(ca.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("CA body = %q", ca.Body.String())
+	}
+
+	// Plain HTTP deployment: no TLS block, no CA to hand out.
+	plain := newTestEnv(t)
+	plainStats := decodeBody[tlsStatsBody](t, plain.do(t, http.MethodGet, "/api/mirror/stats", ""))
+	if plainStats.TLS.Enabled || plainStats.Scheme != "http" {
+		t.Fatalf("plain stats = %+v", plainStats)
+	}
+	if rec := plain.do(t, http.MethodGet, "/api/mirror/ca.crt", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("ca.crt without TLS status = %d", rec.Code)
+	}
+}
+
+func TestMirrorStatsOmitsCACertForExternalCertificates(t *testing.T) {
+	dir := t.TempDir()
+	generated, err := tlscert.SelfSigned(tlscert.Options{Dir: dir, InterfaceIPs: []string{"10.0.0.5"}})
+	if err != nil {
+		t.Fatalf("SelfSigned: %v", err)
+	}
+	// An externally supplied pair has no CA file to export.
+	external, err := tlscert.FromFiles(generated.CertFile, generated.KeyFile)
+	if err != nil {
+		t.Fatalf("FromFiles: %v", err)
+	}
+	st, err := store.Open(store.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv, err := New(Options{
+		Store:     st,
+		Scheduler: &fakeScheduler{started: true},
+		TLS:       external,
+		WebUI:     fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}},
+		Version:   "test-version",
+	})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	env := &testEnv{handler: srv.Handler(), store: st, srv: srv}
+
+	stats := decodeBody[tlsStatsBody](t, env.do(t, http.MethodGet, "/api/mirror/stats", ""))
+	if !stats.TLS.Enabled || stats.TLS.Mode != tlscert.ModeFiles {
+		t.Fatalf("tls block = %+v", stats.TLS)
+	}
+	if stats.TLS.CAURL != "" {
+		t.Fatalf("外部证书不应提供 caUrl: %q", stats.TLS.CAURL)
+	}
+	if rec := env.do(t, http.MethodGet, "/api/mirror/ca.crt", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("ca.crt status = %d", rec.Code)
 	}
 }

@@ -300,6 +300,14 @@
   "upstreams": ["docker.io"],
   "tagTtlMinutes": 60,
   "localAddresses": ["192.168.1.10:8080"],
+  "scheme": "https",
+  "tls": {
+    "enabled": true,
+    "mode": "self-signed",
+    "sans": ["127.0.0.1", "192.168.1.10", "localhost", "mirror.corp.local"],
+    "notAfter": "2029-01-28T14:09:49Z",
+    "caUrl": "/api/mirror/ca.crt"
+  },
   "stats": {"manifestHits": 12, "manifestMisses": 3, "blobHits": 40, "blobMisses": 8, "bytesServed": 12345678}
 }
 ```
@@ -307,6 +315,20 @@
 `localAddresses` 是给 docker 客户端用的候选地址（前端「客户端用法」直接读它）：优先返回浏览器实际访问
 的地址；当该地址是 `localhost`/`127.0.0.1` 等回环名时，改为返回本机非回环 IPv4 地址（端口沿用当前
 服务端口），因为 `localhost` 只在服务本机上有效。前端在拿到该字段后会用它替换掉首屏的 `localhost`。
+
+`scheme` 是当前监听协议（`http` / `https`），前端据此生成客户端命令；`tls` 块在明文部署时是
+`{"enabled": false}`，HTTPS 部署时给出模式、证书覆盖的地址（`sans`）、到期时间（`notAfter`）
+以及 CA 下载地址（`caUrl`，仅内置自签证书有；外部证书不提供）。
+
+### 下载内置 CA
+
+`GET /api/mirror/ca.crt` → 200 `application/x-pem-file`，响应体是 PEM 格式的 CA 证书。
+
+- 供 docker 客户端安装：放到 `/etc/docker/certs.d/<host:port>/ca.crt`（Docker Desktop 用
+  `~/.docker/certs.d/<host:port>/ca.crt`），详见 README「用内置自签证书走 HTTPS」。
+- `TLS_MODE=off`（明文）或 `TLS_MODE=files`（外部证书）时返回 404 + `{"error": "..."}`。
+- 不参与鉴权（本服务无鉴权），但只暴露公钥证书，不含私钥。
+
 
 ## 镜像加速站点（Registry v2）
 

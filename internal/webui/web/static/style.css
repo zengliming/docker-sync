@@ -1172,6 +1172,28 @@ textarea.input { min-height: 84px; resize: vertical; }
 
 .mirror-snippet-field { margin-top: 16px; }
 
+.mirror-tls-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.mirror-tls-mode {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mirror-tls-mode.is-muted {
+  color: var(--muted);
+}
+
 .mirror-snippet {
   margin: 0;
   padding: 12px 14px;

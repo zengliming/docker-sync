@@ -38,11 +38,16 @@ services:
     restart: unless-stopped
     # 让 SIGTERM 有足够时间完成优雅关闭（服务内部最多等待 30s）。
     stop_grace_period: 40s
-    # 以下均可省略：Dockerfile 的 CMD 已给出等价默认值。
-    # 改成 environment 时请去掉每行开头的 "#" 再补全缩进。
-    # environment:
-    #   ADDR: ":8080"
-    #   DATA_DIR: "/data"
-    #   LOG_LEVEL: "info"          # debug | info | warn | error
-    #   TZ: "Asia/Shanghai"        # cron 表达式按此本地时区解释
-    # healthcheck 已由镜像内置（GET /api/health），通常无需覆盖。
+    environment:
+      # 想让 docker 客户端走 HTTPS（不必改 daemon.json）时，开启内置自签证书：
+      # 客户端只需把 http://<本机>:8080/api/mirror/ca.crt 下载后放到
+      # /etc/docker/certs.d/<本机IP:8080>/ca.crt（Docker Desktop：~/.docker/certs.d/…），
+      # 然后 restart docker。证书会自动包含本机所有网卡地址，换 IP 会自动重签。
+      TLS_MODE: "${TLS_MODE:-off}"        # off | self-signed | files
+      # TLS_CERT: "/data/tls/company.pem"  # TLS_MODE=files 时必填
+      # TLS_KEY: "/data/tls/company.key"
+      # TLS_HOSTS: "mirror.corp.local"     # 追加进自签证书的域名，逗号分隔
+      # TLS_DIR: "/data/tls"               # 自签证书存放目录，默认 <data>/tls
+      TZ: "Asia/Shanghai"        # cron 表达式按此本地时区解释
+    # 注意：TLS_MODE 只能通过 environment 传入（Dockerfile 的 CMD 只给了 -addr/-data）。
+    # healthcheck 已由镜像内置（GET /api/health），HTTP/HTTPS 都会自动探测。

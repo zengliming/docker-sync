@@ -22,6 +22,7 @@ import (
 	"docker-sync/internal/model"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
+	"docker-sync/internal/tlscert"
 	"docker-sync/internal/webui"
 )
 
@@ -51,6 +52,10 @@ type Options struct {
 	// pull-through mirror. Tests inject a fake; nil means "talk to the real
 	// upstreams through the store settings".
 	MirrorUpstreams mirror.Upstreams
+	// TLS describes the certificate the server is listening with. It is only
+	// used to report the exact client instructions (/api/mirror/stats) and to
+	// hand out the generated CA (/api/mirror/ca.crt); nil means plain HTTP.
+	TLS *tlscert.Material
 }
 
 // Server is the HTTP front end of the service.
@@ -64,6 +69,7 @@ type Server struct {
 	index  []byte
 
 	mirror *mirror.Server
+	tls    *tlscert.Material
 
 	version   string
 	startedAt time.Time
@@ -93,6 +99,7 @@ func New(opts Options) (*Server, error) {
 		sched:     opts.Scheduler,
 		blobs:     opts.Blobs,
 		web:       web,
+		tls:       opts.TLS,
 		version:   opts.Version,
 		startedAt: opts.StartedAt,
 		log:       logger,
@@ -178,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	mux.HandleFunc("POST /api/settings/proxy-test", s.handleProxyTest)
 	mux.HandleFunc("GET /api/mirror/stats", s.handleMirrorStats)
+	mux.HandleFunc("GET /api/mirror/ca.crt", s.handleMirrorCA)
 
 	mux.HandleFunc("/v2/", s.handleRegistryV2)
 	mux.HandleFunc("/v2", s.handleRegistryV2)

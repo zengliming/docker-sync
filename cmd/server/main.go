@@ -22,6 +22,7 @@ import (
 	"docker-sync/internal/cas"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
+	"docker-sync/internal/tlscert"
 )
 
 // version and commit are overridable at build time with
@@ -83,6 +84,11 @@ func run(args []string) error {
 	addr := flags.String("addr", envOr("ADDR", defaultAddr), "HTTP 监听地址，也可用环境变量 ADDR")
 	dataDir := flags.String("data", envOr("DATA_DIR", defaultDataDir), "数据目录（状态、tar、blob 缓存），也可用环境变量 DATA_DIR")
 	logLevel := flags.String("log-level", envOr("LOG_LEVEL", defaultLogLevel), "日志级别：debug/info/warn/error，也可用环境变量 LOG_LEVEL")
+	tlsMode := flags.String("tls", envOr("TLS_MODE", "off"), "HTTPS 模式：off/self-signed/files，也可用环境变量 TLS_MODE")
+	tlsCert := flags.String("tls-cert", envOr("TLS_CERT", ""), "TLS 证书文件（-tls files 时必填），也可用环境变量 TLS_CERT")
+	tlsKey := flags.String("tls-key", envOr("TLS_KEY", ""), "TLS 私钥文件（-tls files 时必填），也可用环境变量 TLS_KEY")
+	tlsHosts := flags.String("tls-host", envOr("TLS_HOSTS", ""), "追加到自签证书里的域名/IP，逗号分隔，也可用环境变量 TLS_HOSTS")
+	tlsDir := flags.String("tls-dir", envOr("TLS_DIR", ""), "自签证书存放目录，默认 <data>/tls，也可用环境变量 TLS_DIR")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -101,13 +107,28 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("解析数据目录 %q 失败: %w", *dataDir, err)
 	}
+	certDir := strings.TrimSpace(*tlsDir)
+	if certDir == "" {
+		certDir = filepath.Join(absData, "tls")
+	} else if certDir, err = filepath.Abs(certDir); err != nil {
+		return fmt.Errorf("解析证书目录失败: %w", err)
+	}
+	tlsMaterial, err := buildTLS(*tlsMode, *tlsCert, *tlsKey, *tlsHosts, certDir, logger)
+	if err != nil {
+		return err
+	}
 	ver := buildVersion()
-	fmt.Fprintf(os.Stdout, "docker-sync v%s\n  listen: %s\n  data:   %s\n", ver, *addr, absData)
+	scheme := "http"
+	if tlsMaterial != nil {
+		scheme = "https"
+	}
+	fmt.Fprintf(os.Stdout, "docker-sync v%s\n  listen: %s://%s\n  data:   %s\n", ver, scheme, *addr, absData)
 	logger.Info("镜像同步服务启动",
 		"version", ver,
 		"addr", *addr,
 		"dataDir", absData,
 		"logLevel", level.String(),
+		"scheme", scheme,
 		"go", runtime.Version(),
 		"pid", os.Getpid(),
 	)
@@ -136,6 +157,7 @@ func run(args []string) error {
 		Store:     st,
 		Scheduler: sched,
 		Blobs:     blobs,
+		TLS:       tlsMaterial,
 		Version:   ver,
 		StartedAt: startedAt,
 		Logger:    logger,
@@ -160,9 +182,19 @@ func run(args []string) error {
 	}
 	serveErr := make(chan error, 1)
 	go func() {
+		if tlsMaterial != nil {
+			serveErr <- httpServer.ListenAndServeTLS(tlsMaterial.CertFile, tlsMaterial.KeyFile)
+			return
+		}
 		serveErr <- httpServer.ListenAndServe()
 	}()
-	logger.Info("HTTP 服务已监听", "addr", *addr, "web", "/", "api", "/api")
+	logger.Info("HTTP 服务已监听", "addr", *addr, "scheme", scheme, "web", "/", "api", "/api")
+	if tlsMaterial != nil && len(tlsMaterial.CAPEM) > 0 {
+		logger.Info("内置自签证书已就绪：客户端下载 /api/mirror/ca.crt 并放到 /etc/docker/certs.d/<host:port>/ca.crt",
+			"sans", strings.Join(tlsMaterial.SANs, ","),
+			"notAfter", tlsMaterial.NotAfter.Format(time.RFC3339),
+		)
+	}
 
 	var runErr error
 	select {
@@ -192,6 +224,51 @@ func run(args []string) error {
 	}
 	logger.Info("服务已退出")
 	return nil
+}
+
+// buildTLS turns the -tls flags into the material the HTTP server listens with.
+// "off" returns nil so the caller keeps serving plain HTTP.
+func buildTLS(mode, certFile, keyFile, hosts, dir string, logger *slog.Logger) (*tlscert.Material, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "off", "none", "http", "disabled":
+		return nil, nil
+	case "self-signed", "selfsigned", "auto":
+		m, err := tlscert.SelfSigned(tlscert.Options{Dir: dir, Hosts: splitList(hosts)})
+		if err != nil {
+			return nil, fmt.Errorf("初始化自签证书失败: %w", err)
+		}
+		logger.Info("已启用 HTTPS（内置自签证书）",
+			"dir", dir,
+			"sans", strings.Join(m.SANs, ","),
+			"notAfter", m.NotAfter.Format(time.RFC3339),
+			"ca", "/api/mirror/ca.crt",
+		)
+		return m, nil
+	case "files", "file", "custom":
+		m, err := tlscert.FromFiles(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("加载 TLS 证书失败: %w", err)
+		}
+		logger.Info("已启用 HTTPS（外部证书）",
+			"cert", certFile,
+			"sans", strings.Join(m.SANs, ","),
+			"notAfter", m.NotAfter.Format(time.RFC3339),
+		)
+		return m, nil
+	default:
+		return nil, fmt.Errorf("非法 TLS 模式 %q（可选 off/self-signed/files）", mode)
+	}
+}
+
+// splitList splits a comma separated flag value, dropping empty entries.
+func splitList(raw string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // parseLevel maps the -log-level flag to a slog level.

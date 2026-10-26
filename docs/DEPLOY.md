@@ -301,6 +301,70 @@ services:
   - 报 `manifest unknown` → 上游白名单里没有该 host，或上游确实没有这个 tag。
   - 报 429 / `toomanyrequests` → 上游限流，给对应 host 配置「仓库凭据」，或改用内网镜像站做上游。
 
+### 5.6 用内置自签证书给镜像站加 HTTPS
+
+不想维护反代、又不想让客户端改 `daemon.json` 时，让服务自己签发证书：
+
+```yaml
+# docker-compose.yml
+    environment:
+      TLS_MODE: self-signed
+      # 想在证书里补一个域名（例如内网 DNS 名）
+      # TLS_HOSTS: "mirror.corp.local"
+      # 证书默认落在 /data/tls（随数据卷持久化）
+```
+
+```bash
+# 或 docker run / 裸机
+docker run -d --name docker-sync -p 8080:8080 -v "$PWD/data:/data" \
+  -e TLS_MODE=self-signed docker-sync:local
+./docker-sync -addr :8080 -data ./data -tls self-signed
+```
+
+证书细节：
+
+| 项 | 说明 |
+| --- | --- |
+| CA 与 leaf | 首次启动生成，存在 `<data>/tls`（`ca.pem`/`ca.key`/`server.pem`/`server.key`），重启复用 |
+| 有效期 | CA 10 年，服务端证书 2 年；剩余不足 30 天自动续签（CA 不变） |
+| 覆盖地址 | `localhost`、`127.0.0.1`、主机名、所有非回环网卡地址，可用 `-tls-host` 追加域名 |
+| 地址变化 | 换 IP/网卡后自动用同一张 CA 重签 leaf，**客户端不用重装 ca.crt** |
+| 导出 | `GET /api/mirror/ca.crt`（页面「设置 → 镜像加速」有「下载 ca.crt」按钮） |
+
+客户端安装（每台拉镜像的机器执行一次）：
+
+```bash
+# Linux
+sudo mkdir -p /etc/docker/certs.d/192.168.1.10:8080
+sudo curl -k -o /etc/docker/certs.d/192.168.1.10:8080/ca.crt \
+  https://192.168.1.10:8080/api/mirror/ca.crt
+sudo systemctl restart docker
+```
+
+Docker Desktop（Windows/macOS）：把 `ca.crt` 放到
+`%USERPROFILE%\.docker\certs.d\192.168.1.10:8080\ca.crt`（macOS 为 `~/.docker/certs.d/…`），
+再重启 Docker Desktop；daemon 里的 `/etc/docker/certs.d` 位于其虚拟机内，直接改宿主目录不生效。
+
+装好之后 `insecure-registries` 可以删掉，`registry-mirrors` 写成 `https://192.168.1.10:8080`：
+
+```json
+{ "registry-mirrors": ["https://192.168.1.10:8080"] }
+```
+
+- 用**不在 SAN 里**的地址访问会报 `x509: certificate is valid for …, not …`：改用已有地址，
+  或用 `-tls-host` 把该域名加进证书（改完重启服务即可，CA 不变）。
+- 企业 CA / 公共 CA（Let's Encrypt DNS-01 等）签发的证书用
+  `-tls files -tls-cert /data/tls/fullchain.pem -tls-key /data/tls/privkey.pem`（或 `TLS_MODE=files`），
+  客户端只要本来就信任该 CA，就完全不需要配置。
+- 容器健康检查已兼容两种协议（`HEALTHCHECK` 会先试 HTTP 再试 HTTPS）。
+- 排障：
+  - `x509: certificate signed by unknown authority` → 客户端没装 `ca.crt`，或装错目录
+    （目录名必须是 `host:port`，端口不能省）。
+  - `x509: certificate is valid for A, not B` → 用的地址不在证书 SAN 里，见上面的 `-tls-host`。
+  - 网页打不开但 `curl -k` 正常 → 浏览器没信任 CA，属预期（页面本身无需受信，仅 docker 需要）。
+  - `docker pull` 报 `tls: failed to verify certificate: x509: …` 且 `ca.crt` 已放对 →
+    确认是 **CA 证书**（含 `BEGIN CERTIFICATE`，不含私钥）而不是 `server.pem`。
+
 ## 6. 数据备份与升级
 
 ### 6.1 备份

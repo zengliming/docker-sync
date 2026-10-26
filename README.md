@@ -32,7 +32,7 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 
 ## 界面预览
 
-内嵌 Web 控制台（1440×940 实拍，深色主题），五个页面 + 新建任务表单 + 网络代理卡片：
+内嵌 Web 控制台（实拍，深色主题），五个页面 + 新建任务表单 + 网络代理 / 镜像加速卡片：
 
 | 仪表盘 | 任务 |
 | --- | --- |
@@ -46,9 +46,9 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 | --- | --- |
 | ![设置](docs/screenshots/settings.png) | ![新建任务](docs/screenshots/task-modal.png) |
 
-| 网络代理 |
-| --- |
-| ![网络代理](docs/screenshots/settings-proxy.png) |
+| 网络代理 | 镜像加速（含自签 HTTPS 指引） |
+| --- | --- |
+| ![网络代理](docs/screenshots/settings-proxy.png) | ![镜像加速](docs/screenshots/settings-tls.png) |
 
 ## 架构简述
 
@@ -200,13 +200,18 @@ Windows 上数据目录里含 tar、blob 缓存与 `state.json`，建议放在�
 
 ## 配置项
 
-优先级：命令行 flag > 环境变量 > 默认值。三个配置项都同时支持 flag 与 env。
+优先级：命令行 flag > 环境变量 > 默认值。下面每一项都同时支持 flag 与 env。
 
 | flag | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `-addr` | `ADDR` | `:8080` | HTTP 监听地址，例如 `:8080`、`127.0.0.1:9000` |
 | `-data` | `DATA_DIR` | `./data` | 数据目录（状态、CAS、tar 都放在这里） |
 | `-log-level` | `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
+| `-tls` | `TLS_MODE` | `off` | HTTPS 模式：`off`（明文）/ `self-signed`（内置自签）/ `files`（外部证书） |
+| `-tls-cert` | `TLS_CERT` | 空 | 外部证书 PEM，`-tls files` 时必填 |
+| `-tls-key` | `TLS_KEY` | 空 | 外部私钥 PEM，`-tls files` 时必填 |
+| `-tls-host` | `TLS_HOSTS` | 空 | 额外写进自签证书的域名/IP，逗号分隔（本机所有网卡地址会自动包含） |
+| `-tls-dir` | `TLS_DIR` | `<data>/tls` | 自签证书与 CA 的存放目录 |
 | （无） | `TZ` | 容器内 `UTC` | 影响 cron 的本地时区解释与容器内日志时间；镜像已安装 `tzdata` |
 
 示例：
@@ -366,12 +371,12 @@ docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在�
 #     "insecure-registries": ["192.168.1.10:8080"]}
 ```
 
-- **本服务只监听明文 HTTP，`insecure-registries` 是必须的**。docker 客户端对没见过的仓库会先试
+- **默认是明文 HTTP，`insecure-registries` 是必须的**。docker 客户端对没见过的仓库会先试
   `https://`，于是报 `http: server gave HTTP response to HTTPS client`（部分版本表述为"不支持 https 协议"）
   或 `unsupported protocol scheme` —— 把地址加进 `insecure-registries` 后重启 daemon 即可。
   `registry-mirrors` 里要写 `http://` 前缀，`insecure-registries` 里不能写协议前缀。
-- 想彻底省掉 `insecure-registries`：在前面挂一层带证书的 Nginx/Caddy 反代，把 HTTPS 转成对内的
-  HTTP（见 docs/DEPLOY.md「镜像加速站点」）。
+- 想彻底省掉 `insecure-registries`：用下面的内置自签证书以 HTTPS 启动（`-tls self-signed`），
+  或者在前面挂一层带证书的 Nginx/Caddy 反代（见 docs/DEPLOY.md「镜像加速站点」）。
 - 服务地址怎么填：设置页「镜像加速」卡片里的「客户端用法」会显示当前**可用的本机 IP**（页面用
   `localhost` 打开时会自动换成局域网 IP）；也可以在服务器上 `ipconfig`（Windows）/ `ip addr`（Linux）
   自查，先 `curl http://192.168.1.10:8080/v2/` 确认返回 `{}` 再配 docker。
@@ -384,6 +389,47 @@ docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在�
 - 存储：缓存按 blob 摘要去重，遵守「blob 缓存上限 / 过期天数」，超过后由清理任务回收。
 - 「镜像加速」卡片底部有实时统计（manifest/blob 命中与回源、累计下发字节），对应接口
   `GET /api/mirror/stats`。
+
+### 用内置自签证书走 HTTPS（不必改 daemon.json）
+
+docker 客户端之所以需要 `insecure-registries`，只是因为没人为这个地址提供受信证书。让服务自己签发一张
+带**本机所有网卡地址**的证书，客户端就只需要装一次 CA：
+
+```bash
+# 启动时开启内置自签（证书与 CA 存在 <data>/tls，重启复用；换 IP 会自动用同一张 CA 重签）
+docker run -d --name docker-sync -p 8080:8080 -v "$PWD/data:/data" \
+  -e TLS_MODE=self-signed docker-sync:local
+# 非容器方式：./docker-sync -addr :8080 -data ./data -tls self-signed
+```
+
+然后在**每一台要拉镜像的机器**上装一次 CA（服务页面「设置 → 镜像加速」里点「下载 ca.crt」也行）：
+
+```bash
+# Linux
+sudo mkdir -p /etc/docker/certs.d/192.168.1.10:8080
+sudo curl -k -o /etc/docker/certs.d/192.168.1.10:8080/ca.crt \
+  https://192.168.1.10:8080/api/mirror/ca.crt
+sudo systemctl restart docker
+```
+
+Docker Desktop（Windows/macOS）：把下载的 `ca.crt` 放到 `%USERPROFILE%\.docker\certs.d\192.168.1.10:8080\ca.crt`
+（macOS 为 `~/.docker/certs.d/…`），然后重启 Docker Desktop。
+
+完成后就可以直接用 HTTPS，且 `daemon.json` 里**不需要** `insecure-registries`：
+
+```bash
+docker pull 192.168.1.10:8080/library/alpine:3.20
+# daemon.json 当加速器用：{"registry-mirrors": ["https://192.168.1.10:8080"]}
+```
+
+要点：
+
+- 证书自动包含 `localhost`、`127.0.0.1`、主机名和所有非回环网卡地址；**用不在 SAN 里的地址访问会报
+  `x509: certificate is valid for …, not …`**，此时要么用已有地址，要么用 `-tls-host` 补一个域名。
+- 换网卡/IP 后服务会用同一张 CA 重签证书，客户端**不用**重装 `ca.crt`；但换机器/删了 `<data>/tls`
+  就等于换 CA，需要重新分发。
+- 已信任的公共/企业 CA 签发的证书用 `-tls files -tls-cert ... -tls-key ...` 挂进来，客户端零配置。
+- 服务页面会实时读出证书信息（模式、覆盖地址、有效期）并按当前协议生成对应的客户端命令。
 
 ## 私有仓库认证
 

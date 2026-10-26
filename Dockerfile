@@ -74,18 +74,22 @@ WORKDIR /app
 # --chown 让非 root 用户可以执行；二进制名保持 docker-sync。
 COPY --from=build --chown=docker-sync:docker-sync /out/docker-sync /app/docker-sync
 
-# 数据目录：state.json、blobs/（CAS 缓存）、tars/（生成的 tar）。
+# 数据目录：state.json、blobs/（CAS 缓存）、tars/（生成的 tar）、tls/（-tls self-signed 的证书）。
 # 用命名卷或绑定挂载覆盖时，请确保该目录对 UID 10001 可写。
 VOLUME ["/data"]
 
+# 同一个端口既服务 HTTP 也服务 HTTPS（取决于 TLS_MODE），因此只需暴露 8080。
 EXPOSE 8080
 
 USER docker-sync
 
 STOPSIGNAL SIGTERM
 
+# TLS_MODE=self-signed/files 时监听 HTTPS，HTTP 探测会失败，所以两种都试一次。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/api/health || exit 1
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/api/health \
+        || wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8080/api/health \
+        || exit 1
 
 ENTRYPOINT ["./docker-sync"]
 CMD ["-addr", ":8080", "-data", "/data"]

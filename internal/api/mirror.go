@@ -83,14 +83,53 @@ func (s *Server) handleMirrorStats(w http.ResponseWriter, r *http.Request) {
 	if s.mirror != nil {
 		stats = s.mirror.Stats()
 	}
+	block := s.tlsBlock()
+	scheme := "http"
+	if enabled, _ := block["enabled"].(bool); enabled || r.TLS != nil {
+		scheme = "https"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":        cfg.Enabled,
 		"allowAll":       cfg.AllowAll,
 		"upstreams":      cfg.Upstreams,
 		"tagTtlMinutes":  cfg.TagTTLMinutes,
 		"localAddresses": mirrorLocalAddresses(r),
+		"scheme":         scheme,
+		"tls":            block,
 		"stats":          stats,
 	})
+}
+
+// tlsBlock describes the served certificate so the UI can print precise client
+// instructions (host:port plus where to drop ca.crt).
+func (s *Server) tlsBlock() map[string]any {
+	if s.tls == nil || !s.tls.Enabled {
+		return map[string]any{"enabled": false}
+	}
+	block := map[string]any{
+		"enabled":  true,
+		"mode":     s.tls.Mode,
+		"sans":     s.tls.SANs,
+		"notAfter": s.tls.NotAfter,
+	}
+	if len(s.tls.CAPEM) > 0 {
+		block["caUrl"] = "/api/mirror/ca.crt"
+	}
+	return block
+}
+
+// handleMirrorCA hands out the generated CA so the operator can install it as
+// /etc/docker/certs.d/<host:port>/ca.crt on the machines that pull images.
+func (s *Server) handleMirrorCA(w http.ResponseWriter, r *http.Request) {
+	if s.tls == nil || len(s.tls.CAPEM) == 0 {
+		writeError(w, http.StatusNotFound, "当前没有可下载的 CA：HTTPS 未启用或证书由外部提供")
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="docker-sync-ca.crt"`)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(s.tls.CAPEM)
 }
 
 // mirrorLocalAddresses lists the addresses a docker client can use to reach this

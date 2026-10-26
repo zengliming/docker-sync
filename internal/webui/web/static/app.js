@@ -1364,6 +1364,17 @@
     }
   }
 
+  /* 把内置自签 CA 下载下来，客户端只需丢进 certs.d 目录 */
+  function downloadMirrorCA() {
+    const link = document.createElement('a');
+    link.href = 'api/mirror/ca.crt';
+    link.download = 'docker-sync-ca.crt';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast('已开始下载 ca.crt：Linux 放到 /etc/docker/certs.d/<地址>/ca.crt，Docker Desktop 放到 ~/.docker/certs.d/<地址>/ca.crt', 'ok');
+  }
+
   function mirrorSettingsHtml(d) {
     const cfg = d.mirror || {};
     const upstreams = Array.isArray(cfg.upstreams) && cfg.upstreams.length ? cfg.upstreams : ['docker.io'];
@@ -1373,18 +1384,72 @@
     /* 这一屏是不是用回环地址凑的（等统计接口回来再重渲染） */
     state.mirrorAddrStale = !addresses.length || (isLoopbackHostname(location.hostname) && address === location.host);
     const others = addresses.slice(1);
-    const daemonExample = '{\n' +
-      '  "registry-mirrors": ["http://' + address + '"],\n' +
-      '  "insecure-registries": ["' + address + '"]\n' +
-      '}';
-    const snippet = '# 1) 直接当镜像站用（其它机器要用本机 IP，localhost 只在服务这台机器上有效）\n' +
-      'docker pull ' + address + '/library/alpine:3.20\n\n' +
-      '# 2) 当 Docker Hub 加速器用：daemon.json（Docker Desktop 在「设置 → Docker Engine」里改）\n' +
-      daemonExample;
-    const hint = '本服务是明文 HTTP：docker 客户端默认先试 HTTPS，没登记 insecure-registries 就会报 ' +
-      '「http: server gave HTTP response to HTTPS client」。' +
-      (others.length ? '本机其它可用地址：' + others.join('、') + '。' : '') +
-      '在别的机器上请把上面的 ' + address + ' 换成这台服务器的实际 IP（用 ipconfig / ip addr 查看）。';
+    const mirrorMeta = state.mirrorStats && typeof state.mirrorStats === 'object' ? state.mirrorStats : {};
+    const scheme = mirrorMeta.scheme === 'https' ? 'https' : 'http';
+    const tls = mirrorMeta.tls && typeof mirrorMeta.tls === 'object' ? mirrorMeta.tls : {};
+    const tlsSelfSigned = scheme === 'https' && tls.mode === 'self-signed';
+    const tlsExternal = scheme === 'https' && tls.mode === 'files';
+    const caURL = 'https://' + address + (tls.caUrl || '/api/mirror/ca.crt');
+
+    let snippet;
+    let hint;
+    if (tlsSelfSigned) {
+      /* 自签证书：客户端只需把 ca.crt 丢进 certs.d，不用动 daemon.json */
+      snippet = '# 1) 让每台要拉镜像的机器信任本服务的自签证书（只需做一次）\n' +
+        '#    Linux：\n' +
+        'sudo mkdir -p /etc/docker/certs.d/' + address + '\n' +
+        'sudo curl -k -o /etc/docker/certs.d/' + address + '/ca.crt ' + caURL + '\n' +
+        'sudo systemctl restart docker\n' +
+        '#    Docker Desktop（Windows/macOS）：把下载的 ca.crt 放到\n' +
+        '#    %USERPROFILE%\\.docker\\certs.d\\' + address + '\\ca.crt（macOS 为 ~/.docker/certs.d/）\n' +
+        '#    然后重启 Docker Desktop\n\n' +
+        '# 2) 直接当镜像站用\n' +
+        'docker pull ' + address + '/library/alpine:3.20\n\n' +
+        '# 3) 当 Docker Hub 加速器用：daemon.json（HTTPS + 受信证书，不需要 insecure-registries）\n' +
+        '{\n  "registry-mirrors": ["https://' + address + '"]\n}';
+      hint = '当前用内置自签证书提供 HTTPS：客户端装好上面的 ca.crt 即可，不必改 daemon.json。' +
+        '证书里已经写入了这些地址：' + ((tls.sans && tls.sans.length) ? tls.sans.join('、') : '（未知）') +
+        '，请用其中之一访问，换成证书里没有的 IP 会报 x509 校验失败。' +
+        (others.length ? '本机其它可用地址：' + others.join('、') + '。' : '');
+    } else if (tlsExternal) {
+      snippet = '# 本服务用外部证书提供 HTTPS：客户端只要信任签发它的 CA 即可，无需其它配置\n\n' +
+        '# 1) 直接当镜像站用\n' +
+        'docker pull ' + address + '/library/alpine:3.20\n\n' +
+        '# 2) 当 Docker Hub 加速器用：daemon.json\n' +
+        '{\n  "registry-mirrors": ["https://' + address + '"]\n}';
+      hint = '当前使用外部证书（企业 CA / 公共 CA 签发）：客户端已信任该 CA 时开箱可用，不必改 daemon.json。' +
+        '证书覆盖的地址：' + ((tls.sans && tls.sans.length) ? tls.sans.join('、') : '（未知）') + '。';
+    } else {
+      const daemonExample = '{\n' +
+        '  "registry-mirrors": ["http://' + address + '"],\n' +
+        '  "insecure-registries": ["' + address + '"]\n' +
+        '}';
+      snippet = '# 1) 直接当镜像站用（其它机器要用本机 IP，localhost 只在服务这台机器上有效）\n' +
+        'docker pull ' + address + '/library/alpine:3.20\n\n' +
+        '# 2) 当 Docker Hub 加速器用：daemon.json（Docker Desktop 在「设置 → Docker Engine」里改）\n' +
+        daemonExample;
+      hint = '本服务是明文 HTTP：docker 客户端默认先试 HTTPS，没登记 insecure-registries 就会报 ' +
+        '「http: server gave HTTP response to HTTPS client」。' +
+        '想省掉 insecure-registries，可以用 -tls self-signed 启动本服务，页面会给出装证书的一行命令。' +
+        (others.length ? '本机其它可用地址：' + others.join('、') + '。' : '') +
+        '在别的机器上请把上面的 ' + address + ' 换成这台服务器的实际 IP（用 ipconfig / ip addr 查看）。';
+    }
+
+    let tlsInfo = '';
+    if (tls.enabled) {
+      const modeText = tlsSelfSigned ? '内置自签证书' : (tlsExternal ? '外部证书' : 'HTTPS');
+      tlsInfo = '<div class="field mirror-snippet-field"><label>HTTPS 证书</label>' +
+        '<div class="mirror-tls-row"><span class="mirror-tls-mode">' + esc(modeText + ' · ' + scheme + '://' + address) + '</span>' +
+        (tls.caUrl
+          ? btn('下载 ca.crt', 'mirror-ca-download', { cls: 'btn-ghost', size: 'sm' })
+          : '<span class="mirror-tls-mode is-muted">由外部 CA 签发，无内置 CA 可下载</span>') +
+        '</div>' +
+        '<span class="field-hint">' +
+        esc('有效期至 ' + (tls.notAfter ? new Date(tls.notAfter).toLocaleString() : '未知') +
+          (tls.sans && tls.sans.length ? '，覆盖 ' + tls.sans.join('、') : '') +
+          '。地址变化（换网卡/IP）时服务会自动用同一张 CA 重新签发，客户端不用重装证书。') +
+        '</span></div>';
+    }
 
     return '<section class="card card-pad"><div class="card-head">' +
       '<h3>镜像加速（Registry 镜像站）</h3>' +
@@ -1406,6 +1471,7 @@
       '<div class="field mirror-snippet-field"><label>客户端用法</label>' +
       '<pre class="mirror-snippet"><code>' + esc(snippet) + '</code></pre>' +
       '<span class="field-hint">' + esc(hint) + '</span></div>' +
+      tlsInfo +
       mirrorStatsBlockHtml() +
       '</section>';
   }
@@ -2346,6 +2412,9 @@
         break;
       case 'mirror-stats-refresh':
         await refreshMirrorStats(el);
+        break;
+      case 'mirror-ca-download':
+        downloadMirrorCA();
         break;
       default:
         break;
