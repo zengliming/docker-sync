@@ -39,12 +39,13 @@ services:
     # 让 SIGTERM 有足够时间完成优雅关闭（服务内部最多等待 30s）。
     stop_grace_period: 40s
     environment:
-      # 想让 docker 客户端走 HTTPS（不必改 daemon.json）时，开启内置自签证书：
-      # 客户端只需把 http://<本机>:8080/api/mirror/ca.crt 下载后放到
+      # 默认 auto：给了 TLS_CERT/TLS_KEY 就用外部证书，没给就自动生成自签证书并监听 HTTPS。
+      # 想跑明文 HTTP（客户端要配 insecure-registries）必须显式设 TLS_MODE=off。
+      # 客户端只需把 https://<本机>:8080/api/mirror/ca.crt 下载后放到
       # /etc/docker/certs.d/<本机IP:8080>/ca.crt（Docker Desktop：~/.docker/certs.d/…），
       # 然后 restart docker。证书会自动包含本机所有网卡地址，换 IP 会自动重签。
-      TLS_MODE: "${TLS_MODE:-off}"        # off | self-signed | files
-      # TLS_CERT: "/data/tls/company.pem"  # TLS_MODE=files 时必填
+      TLS_MODE: "${TLS_MODE:-auto}"        # auto | self-signed | files | off
+      # TLS_CERT: "/data/tls/company.pem"  # 指定即按外部证书走（auto 模式自动识别）
       # TLS_KEY: "/data/tls/company.key"
       # TLS_HOSTS: "mirror.corp.local"     # 追加进自签证书的域名，逗号分隔
       # TLS_DIR: "/data/tls"               # 自签证书存放目录，默认 <data>/tls

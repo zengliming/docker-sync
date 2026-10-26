@@ -207,9 +207,9 @@ Windows 上数据目录里含 tar、blob 缓存与 `state.json`，建议放在�
 | `-addr` | `ADDR` | `:8080` | HTTP 监听地址，例如 `:8080`、`127.0.0.1:9000` |
 | `-data` | `DATA_DIR` | `./data` | 数据目录（状态、CAS、tar 都放在这里） |
 | `-log-level` | `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
-| `-tls` | `TLS_MODE` | `off` | HTTPS 模式：`off`（明文）/ `self-signed`（内置自签）/ `files`（外部证书） |
-| `-tls-cert` | `TLS_CERT` | 空 | 外部证书 PEM，`-tls files` 时必填 |
-| `-tls-key` | `TLS_KEY` | 空 | 外部私钥 PEM，`-tls files` 时必填 |
+| `-tls` | `TLS_MODE` | `auto` | HTTPS 模式：`auto`（默认，给了证书用证书、没给就自动生成自签）/ `self-signed` / `files`（外部证书）/ `off`（明文 HTTP） |
+| `-tls-cert` | `TLS_CERT` | 空 | 外部证书 PEM；与 `-tls-key` 成对提供时 `auto` 模式自动按外部证书走 |
+| `-tls-key` | `TLS_KEY` | 空 | 外部私钥 PEM；与 `-tls-cert` 成对提供 |
 | `-tls-host` | `TLS_HOSTS` | 空 | 额外写进自签证书的域名/IP，逗号分隔（本机所有网卡地址会自动包含） |
 | `-tls-dir` | `TLS_DIR` | `<data>/tls` | 自签证书与 CA 的存放目录 |
 | （无） | `TZ` | 容器内 `UTC` | 影响 cron 的本地时区解释与容器内日志时间；镜像已安装 `tzdata` |
@@ -351,7 +351,7 @@ docker 客户端直接拉取，第一次回源、之后命中本地 blob 缓存�
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| 启用镜像加速站点 | 关 | 打开后 `http://<本服务地址>/v2/` 对外提供 Registry v2 读接口 |
+| 启用镜像加速站点 | 关 | 打开后 `https://<本服务地址>/v2/` 对外提供 Registry v2 读接口（可用 `-tls off` 改回明文） |
 | 允许代理任意上游仓库 | 关 | 关闭时只服务下面列出的上游；打开后请求路径首段看起来是主机名（含 `.` 或 `:`）就按该主机回源 |
 | 允许的上游仓库 | `docker.io` | 每行一个主机名，**第一行是默认上游**；不在列表里的名称整体作为默认上游的仓库名 |
 | tag 缓存时长 | 60 分钟 | tag → digest 映射的复用时长，过期后向上游确认 tag 是否移动 |
@@ -367,19 +367,17 @@ docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在�
 # 2) 给整个 daemon 配镜像加速（只对 Docker Hub 生效）
 #    Linux: /etc/docker/daemon.json
 #    Docker Desktop: Settings → Docker Engine（同一个 JSON）
-#    {"registry-mirrors": ["http://192.168.1.10:8080"],
-#     "insecure-registries": ["192.168.1.10:8080"]}
+#    {"registry-mirrors": ["https://192.168.1.10:8080"]}
 ```
 
-- **默认是明文 HTTP，`insecure-registries` 是必须的**。docker 客户端对没见过的仓库会先试
-  `https://`，于是报 `http: server gave HTTP response to HTTPS client`（部分版本表述为"不支持 https 协议"）
-  或 `unsupported protocol scheme` —— 把地址加进 `insecure-registries` 后重启 daemon 即可。
-  `registry-mirrors` 里要写 `http://` 前缀，`insecure-registries` 里不能写协议前缀。
-- 想彻底省掉 `insecure-registries`：用下面的内置自签证书以 HTTPS 启动（`-tls self-signed`），
-  或者在前面挂一层带证书的 Nginx/Caddy 反代（见 docs/DEPLOY.md「镜像加速站点」）。
-- 服务地址怎么填：设置页「镜像加速」卡片里的「客户端用法」会显示当前**可用的本机 IP**（页面用
-  `localhost` 打开时会自动换成局域网 IP）；也可以在服务器上 `ipconfig`（Windows）/ `ip addr`（Linux）
-  自查，先 `curl http://192.168.1.10:8080/v2/` 确认返回 `{}` 再配 docker。
+- **默认启动就是 HTTPS + 内置自签证书**（`-tls auto`）：没给证书就自动生成，客户端只需装一次
+  `ca.crt`（见下一节），`daemon.json` 里**不需要** `insecure-registries`。
+- 想用明文 HTTP（省掉装证书，但要配 `insecure-registries`）：显式加 `-tls off`（容器里 `TLS_MODE=off`）。
+  此时 `registry-mirrors` 要写 `http://` 前缀、`insecure-registries` 里不能写协议前缀，否则 docker 会报
+  `http: server gave HTTP response to HTTPS client`（部分版本表述为"不支持 https 协议"）。
+- 服务地址怎么填：设置页「镜像加速」卡片里的「客户端用法」会按当前协议生成命令，并显示当前**可用的
+  本机 IP**（页面用 `localhost` 打开时会自动换成局域网 IP）；也可以在服务器上 `ipconfig`（Windows）/
+  `ip addr`（Linux）自查，先 `curl -k https://192.168.1.10:8080/v2/` 确认返回 `{}` 再配 docker。
 - 只读：`docker push`、`blobs/uploads`、`tags/list` 都不支持（返回 405/404）。
 - 安全：`allowAll` 关闭时只有白名单内的上游会被代理，避免变成公开的开放代理；建议内网使用时保持关闭，
   只列出真正需要的上游。服务本身**没有鉴权**，不要把端口直接暴露到公网。
@@ -396,10 +394,10 @@ docker 客户端之所以需要 `insecure-registries`，只是因为没人为这
 带**本机所有网卡地址**的证书，客户端就只需要装一次 CA：
 
 ```bash
-# 启动时开启内置自签（证书与 CA 存在 <data>/tls，重启复用；换 IP 会自动用同一张 CA 重签）
-docker run -d --name docker-sync -p 8080:8080 -v "$PWD/data:/data" \
-  -e TLS_MODE=self-signed docker-sync:local
-# 非容器方式：./docker-sync -addr :8080 -data ./data -tls self-signed
+# 不需要额外参数：默认 auto 模式在没提供证书时自动生成自签证书
+# （证书与 CA 存在 <data>/tls，重启复用；换 IP 会自动用同一张 CA 重签）
+docker run -d --name docker-sync -p 8080:8080 -v "$PWD/data:/data" docker-sync:local
+# 非容器方式：./docker-sync -addr :8080 -data ./data
 ```
 
 然后在**每一台要拉镜像的机器**上装一次 CA（服务页面「设置 → 镜像加速」里点「下载 ca.crt」也行）：

@@ -51,8 +51,14 @@ func TestBuildTLSModes(t *testing.T) {
 	if m, err := buildTLS("off", "", "", "", t.TempDir(), logger); err != nil || m != nil {
 		t.Fatalf("off = %+v, %v", m, err)
 	}
-	if m, err := buildTLS("", "", "", "", t.TempDir(), logger); err != nil || m != nil {
-		t.Fatalf("empty mode = %+v, %v", m, err)
+
+	// 默认模式（未传 -tls、也没给证书）必须自动用自签证书。
+	auto, err := buildTLS("", "", "", "", t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("auto: %v", err)
+	}
+	if auto == nil || auto.Mode != tlscert.ModeSelfSigned || len(auto.CAPEM) == 0 {
+		t.Fatalf("auto 模式应回落自签并导出 CA，得到 %+v", auto)
 	}
 
 	dir := t.TempDir()
@@ -97,5 +103,17 @@ func TestBuildTLSModes(t *testing.T) {
 	}
 	if _, err := buildTLS("bogus", "", "", "", t.TempDir(), logger); err == nil {
 		t.Fatal("非法模式应报错")
+	}
+
+	// auto 下给了证书就按外部证书走，不再生成自签。
+	autoFiles, err := buildTLS("auto", self.CertFile, self.KeyFile, "", t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("auto + 证书: %v", err)
+	}
+	if autoFiles == nil || autoFiles.Mode != tlscert.ModeFiles || len(autoFiles.CAPEM) != 0 {
+		t.Fatalf("auto + 证书应使用外部证书，得到 %+v", autoFiles)
+	}
+	if _, err := buildTLS("auto", self.CertFile, "", "", t.TempDir(), logger); err == nil {
+		t.Fatal("auto 下只给证书不给私钥应报错")
 	}
 }

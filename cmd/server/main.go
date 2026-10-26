@@ -84,9 +84,9 @@ func run(args []string) error {
 	addr := flags.String("addr", envOr("ADDR", defaultAddr), "HTTP 监听地址，也可用环境变量 ADDR")
 	dataDir := flags.String("data", envOr("DATA_DIR", defaultDataDir), "数据目录（状态、tar、blob 缓存），也可用环境变量 DATA_DIR")
 	logLevel := flags.String("log-level", envOr("LOG_LEVEL", defaultLogLevel), "日志级别：debug/info/warn/error，也可用环境变量 LOG_LEVEL")
-	tlsMode := flags.String("tls", envOr("TLS_MODE", "off"), "HTTPS 模式：off/self-signed/files，也可用环境变量 TLS_MODE")
-	tlsCert := flags.String("tls-cert", envOr("TLS_CERT", ""), "TLS 证书文件（-tls files 时必填），也可用环境变量 TLS_CERT")
-	tlsKey := flags.String("tls-key", envOr("TLS_KEY", ""), "TLS 私钥文件（-tls files 时必填），也可用环境变量 TLS_KEY")
+	tlsMode := flags.String("tls", envOr("TLS_MODE", "auto"), "HTTPS 模式：auto/self-signed/files/off（auto = 有证书用证书，没有就自动生成自签；off 为明文 HTTP），也可用环境变量 TLS_MODE")
+	tlsCert := flags.String("tls-cert", envOr("TLS_CERT", ""), "TLS 证书文件（与 -tls-key 成对提供即启用外部证书，默认模式 auto 下自动生效），也可用环境变量 TLS_CERT")
+	tlsKey := flags.String("tls-key", envOr("TLS_KEY", ""), "TLS 私钥文件（与 -tls-cert 成对提供即启用外部证书，默认模式 auto 下自动生效），也可用环境变量 TLS_KEY")
 	tlsHosts := flags.String("tls-host", envOr("TLS_HOSTS", ""), "追加到自签证书里的域名/IP，逗号分隔，也可用环境变量 TLS_HOSTS")
 	tlsDir := flags.String("tls-dir", envOr("TLS_DIR", ""), "自签证书存放目录，默认 <data>/tls，也可用环境变量 TLS_DIR")
 	if err := flags.Parse(args); err != nil {
@@ -227,12 +227,35 @@ func run(args []string) error {
 }
 
 // buildTLS turns the -tls flags into the material the HTTP server listens with.
-// "off" returns nil so the caller keeps serving plain HTTP.
+//
+// 默认模式 auto：给了证书文件就按外部证书加载，没给就用内置自签证书；
+// 想跑明文 HTTP 需要显式传 -tls off。返回 nil 表示继续用明文 HTTP。
 func buildTLS(mode, certFile, keyFile, hosts, dir string, logger *slog.Logger) (*tlscert.Material, error) {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "off", "none", "http", "disabled":
+	certFile = strings.TrimSpace(certFile)
+	keyFile = strings.TrimSpace(keyFile)
+
+	switch mode = strings.ToLower(strings.TrimSpace(mode)); mode {
+	case "off", "none", "http", "disabled":
 		return nil, nil
-	case "self-signed", "selfsigned", "auto":
+	case "", "auto", "default":
+		switch {
+		case certFile == "" && keyFile == "":
+			mode = tlsModeSelfSigned
+		case certFile == "" || keyFile == "":
+			return nil, fmt.Errorf("-tls-cert 与 -tls-key 需要成对提供（当前只给了其中一个）")
+		default:
+			mode = tlsModeFiles
+		}
+	case "self-signed", "selfsigned":
+		mode = tlsModeSelfSigned
+	case "files", "file", "custom":
+		mode = tlsModeFiles
+	default:
+		return nil, fmt.Errorf("非法 TLS 模式 %q（可选 auto/off/self-signed/files）", mode)
+	}
+
+	switch mode {
+	case tlsModeSelfSigned:
 		m, err := tlscert.SelfSigned(tlscert.Options{Dir: dir, Hosts: splitList(hosts)})
 		if err != nil {
 			return nil, fmt.Errorf("初始化自签证书失败: %w", err)
@@ -244,7 +267,7 @@ func buildTLS(mode, certFile, keyFile, hosts, dir string, logger *slog.Logger) (
 			"ca", "/api/mirror/ca.crt",
 		)
 		return m, nil
-	case "files", "file", "custom":
+	case tlsModeFiles:
 		m, err := tlscert.FromFiles(certFile, keyFile)
 		if err != nil {
 			return nil, fmt.Errorf("加载 TLS 证书失败: %w", err)
@@ -255,10 +278,15 @@ func buildTLS(mode, certFile, keyFile, hosts, dir string, logger *slog.Logger) (
 			"notAfter", m.NotAfter.Format(time.RFC3339),
 		)
 		return m, nil
-	default:
-		return nil, fmt.Errorf("非法 TLS 模式 %q（可选 off/self-signed/files）", mode)
 	}
+	return nil, fmt.Errorf("非法 TLS 模式 %q", mode)
 }
+
+// TLS 模式取值（见 -tls flag）。
+const (
+	tlsModeSelfSigned = "self-signed"
+	tlsModeFiles      = "files"
+)
 
 // splitList splits a comma separated flag value, dropping empty entries.
 func splitList(raw string) []string {
