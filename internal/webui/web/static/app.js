@@ -2045,6 +2045,8 @@
       await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
       state.settingsDirty = false;
       await loadSettings(true, true);
+      /* 保存后立刻刷新统计块：否则刚启用的加速站还显示「镜像加速未启用」 */
+      await loadMirrorStats(true);
       toast('设置已保存', 'success');
     } catch (err) {
       toast(err && err.message ? err.message : '保存设置失败', 'error');
