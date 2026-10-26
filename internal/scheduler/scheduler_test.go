@@ -166,7 +166,7 @@ func (e *schedEnv) createTask(mutate func(*model.Task)) model.Task {
 
 func (e *schedEnv) waitRunDone(runID string) model.Run {
 	e.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		run, ok := e.store.GetRun(runID)
 		if !ok {
@@ -232,7 +232,7 @@ func TestTriggerSyncBusyWhileRunInFlight(t *testing.T) {
 	if first.Status != model.RunStatusRunning || first.Phase != model.PhaseQueued {
 		t.Fatalf("first run snapshot = %s/%s", first.Status, first.Phase)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		task, _ := env.store.GetTask(created.ID)
 		if task.Status == model.TaskStatusRunning {

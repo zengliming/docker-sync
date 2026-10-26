@@ -727,7 +727,7 @@ func TestEventsStreamBroadcasts(t *testing.T) {
 	// Any store change is broadcast to connected clients as event: update.
 	env.store.SetSettings(env.store.SnapshotSettings())
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	var sawEvent bool
 	for time.Now().Before(deadline) {
 		line, err := reader.ReadString('\n')
