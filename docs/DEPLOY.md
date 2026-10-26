@@ -273,10 +273,21 @@ services:
 }
 ```
 
+- **地址别写 `localhost`**：`localhost` 指向客户端自己，只有「docker 和本服务跑在同一台机器」时才行。
+  给别的机器用必须写服务器 IP 或域名。设置页的「客户端用法」会自动显示本机可用 IP
+  （页面用 `localhost` 打开时会替换成局域网地址），也可以 `ipconfig` / `ip addr` 自查，
+  先 `curl http://192.168.1.10:8080/v2/` 应返回 `{}`。
+- **必须先配 `insecure-registries`**，因为本服务只提供明文 HTTP：docker 对陌生仓库默认走
+  `https://`，握手失败就报 `http: server gave HTTP response to HTTPS client`
+  （部分版本表述为"不支持 https 协议"）或 `unsupported protocol scheme`。
+  写对之后的区别：`registry-mirrors` 里带 `http://`，`insecure-registries` 里**不带**协议前缀；
+  改完要 `systemctl restart docker`（Docker Desktop 保存后会自动重启引擎）。
+- Docker Desktop：Settings → Docker Engine 里改同一个 JSON；Windows 上如果 docker 在别的机器
+  （Docker Desktop + 远程 WSL），`registry-mirrors` 仍写法相同，只要那台机器能访问该 IP:端口。
 - `registry-mirrors` 只对 Docker Hub 生效；要加速 `ghcr.io`、`quay.io` 等其他上游，
   改成显式拉取：`docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1`（需把 `ghcr.io` 加进上游白名单）。
-- 本服务不带 TLS，必须登记 `insecure-registries`。想避免这一项，在前面挂一层带证书的反向代理
-  （见 5.1 Nginx / 5.2 Caddy），再把加速地址写成 `https://mirror.example.com`。
+- 想彻底避免 `insecure-registries`，在前面挂一层带证书的反向代理（见 5.1 Nginx / 5.2 Caddy），
+  再把加速地址写成 `https://mirror.example.com`；此时 docker 会按标准 HTTPS 校验，不需要 insecure 配置。
 - 反向代理需要放开大文件与长连接，建议 `proxy_request_buffering off;`、`client_max_body_size 0;`，
   并保留 `Range` 头（Nginx 默认透传）。
 - 白名单：`allowAll` 关闭时只代理列表里的上游（默认 `docker.io`），避免成为开放代理；
@@ -284,7 +295,9 @@ services:
 - 存储：加速缓存写入同一个数据目录的 blob 缓存，受「blob 缓存上限 / 过期天数」约束，
   定期清理可回收空间；存量 tar 不受影响。
 - 排障：
-  - `docker pull` 报 `http: server gave HTTP response to HTTPS client` → 没加 `insecure-registries`。
+  - `docker pull` 报 `http: server gave HTTP response to HTTPS client` / 「不支持 https 协议」/
+    `unsupported protocol scheme` → 该地址没加进 `insecure-registries`，或加了但没重启 daemon。
+  - `docker pull localhost:8080/...` 在别的机器上 `connection refused` → 用了 `localhost`，换服务器 IP。
   - 报 `manifest unknown` → 上游白名单里没有该 host，或上游确实没有这个 tag。
   - 报 429 / `toomanyrequests` → 上游限流，给对应 host 配置「仓库凭据」，或改用内网镜像站做上游。
 

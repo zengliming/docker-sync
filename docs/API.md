@@ -299,9 +299,14 @@
   "allowAll": false,
   "upstreams": ["docker.io"],
   "tagTtlMinutes": 60,
+  "localAddresses": ["192.168.1.10:8080"],
   "stats": {"manifestHits": 12, "manifestMisses": 3, "blobHits": 40, "blobMisses": 8, "bytesServed": 12345678}
 }
 ```
+
+`localAddresses` 是给 docker 客户端用的候选地址（前端「客户端用法」直接读它）：优先返回浏览器实际访问
+的地址；当该地址是 `localhost`/`127.0.0.1` 等回环名时，改为返回本机非回环 IPv4 地址（端口沿用当前
+服务端口），因为 `localhost` 只在服务本机上有效。前端在拿到该字段后会用它替换掉首屏的 `localhost`。
 
 ## 镜像加速站点（Registry v2）
 

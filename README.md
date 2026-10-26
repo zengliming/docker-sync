@@ -351,7 +351,8 @@ docker 客户端直接拉取，第一次回源、之后命中本地 blob 缓存�
 | 允许的上游仓库 | `docker.io` | 每行一个主机名，**第一行是默认上游**；不在列表里的名称整体作为默认上游的仓库名 |
 | tag 缓存时长 | 60 分钟 | tag → digest 映射的复用时长，过期后向上游确认 tag 是否移动 |
 
-客户端两种用法（把 `192.168.1.10:8080` 换成实际地址）：
+客户端两种用法（把 `192.168.1.10:8080` 换成这台服务器的实际 IP；`localhost` 只在服务本机上有效，
+其它机器必须用 IP 或域名）：
 
 ```bash
 # 1) 直接当仓库地址用，任何客户端都支持
@@ -359,13 +360,21 @@ docker pull 192.168.1.10:8080/library/alpine:3.20
 docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在白名单里
 
 # 2) 给整个 daemon 配镜像加速（只对 Docker Hub 生效）
-#    /etc/docker/daemon.json
+#    Linux: /etc/docker/daemon.json
+#    Docker Desktop: Settings → Docker Engine（同一个 JSON）
 #    {"registry-mirrors": ["http://192.168.1.10:8080"],
 #     "insecure-registries": ["192.168.1.10:8080"]}
 ```
 
-- 本服务不带 TLS，所以客户端要把它登记进 `insecure-registries`；想省掉这一步就在前面挂一层带证书的
-  Nginx/Caddy（见 docs/DEPLOY.md）。
+- **本服务只监听明文 HTTP，`insecure-registries` 是必须的**。docker 客户端对没见过的仓库会先试
+  `https://`，于是报 `http: server gave HTTP response to HTTPS client`（部分版本表述为"不支持 https 协议"）
+  或 `unsupported protocol scheme` —— 把地址加进 `insecure-registries` 后重启 daemon 即可。
+  `registry-mirrors` 里要写 `http://` 前缀，`insecure-registries` 里不能写协议前缀。
+- 想彻底省掉 `insecure-registries`：在前面挂一层带证书的 Nginx/Caddy 反代，把 HTTPS 转成对内的
+  HTTP（见 docs/DEPLOY.md「镜像加速站点」）。
+- 服务地址怎么填：设置页「镜像加速」卡片里的「客户端用法」会显示当前**可用的本机 IP**（页面用
+  `localhost` 打开时会自动换成局域网 IP）；也可以在服务器上 `ipconfig`（Windows）/ `ip addr`（Linux）
+  自查，先 `curl http://192.168.1.10:8080/v2/` 确认返回 `{}` 再配 docker。
 - 只读：`docker push`、`blobs/uploads`、`tags/list` 都不支持（返回 405/404）。
 - 安全：`allowAll` 关闭时只有白名单内的上游会被代理，避免变成公开的开放代理；建议内网使用时保持关闭，
   只列出真正需要的上游。服务本身**没有鉴权**，不要把端口直接暴露到公网。

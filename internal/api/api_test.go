@@ -951,11 +951,12 @@ func TestMirrorStatsEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
 	got := decodeBody[struct {
-		Enabled       bool     `json:"enabled"`
-		AllowAll      bool     `json:"allowAll"`
-		Upstreams     []string `json:"upstreams"`
-		TagTTLMinutes int      `json:"tagTtlMinutes"`
-		Stats         struct {
+		Enabled        bool     `json:"enabled"`
+		AllowAll       bool     `json:"allowAll"`
+		Upstreams      []string `json:"upstreams"`
+		TagTTLMinutes  int      `json:"tagTtlMinutes"`
+		LocalAddresses []string `json:"localAddresses"`
+		Stats          struct {
 			ManifestHits int64 `json:"manifestHits"`
 			BlobHits     int64 `json:"blobHits"`
 		} `json:"stats"`
@@ -969,13 +970,48 @@ func TestMirrorStatsEndpoint(t *testing.T) {
 	if got.Stats.ManifestHits != 0 || got.Stats.BlobHits != 0 {
 		t.Fatalf("stats = %+v", got.Stats)
 	}
+	// The address the browser used is not a loopback name here, so it must be
+	// reported back for the "客户端用法" snippet.
+	found := false
+	for _, addr := range got.LocalAddresses {
+		if addr == "example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("localAddresses = %v, want it to contain the request host", got.LocalAddresses)
+	}
 
 	// The JSON keys must match the documented contract exactly (the frontend
 	// reads them literally), so check the raw object as well.
 	raw := decodeBody[map[string]json.RawMessage](t, env.do(t, http.MethodGet, "/api/mirror/stats", ""))
-	for _, key := range []string{"enabled", "allowAll", "upstreams", "tagTtlMinutes", "stats"} {
+	for _, key := range []string{"enabled", "allowAll", "upstreams", "tagTtlMinutes", "localAddresses", "stats"} {
 		if _, ok := raw[key]; !ok {
 			t.Fatalf("mirror stats response is missing %q: %v", key, raw)
+		}
+	}
+}
+
+func TestLoopbackHost(t *testing.T) {
+	cases := map[string]bool{
+		"localhost":     true,
+		"LOCALHOST":     true,
+		"localhost.":    true,
+		"127.0.0.1":     true,
+		"127.1.2.3":     true,
+		"::1":           true,
+		"[::1]":         true,
+		"":              true,
+		"192.168.1.10":  false,
+		"example.com":   false,
+		"10.0.0.5":      false,
+		"myhost.local":  false,
+		"docker.local":  false,
+		"localhost.lan": false,
+	}
+	for host, want := range cases {
+		if got := loopbackHost(host); got != want {
+			t.Fatalf("loopbackHost(%q) = %v, want %v", host, got, want)
 		}
 	}
 }

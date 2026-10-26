@@ -59,6 +59,7 @@
     mirrorStats: null,
     mirrorStatsLoading: false,
     mirrorStatsError: null,
+    mirrorAddrStale: false,
     loading: { overview: false, tasks: false, runs: false, files: false, settings: false },
     errors: { overview: null, tasks: null, runs: null, files: null, settings: null },
     runFilter: { taskId: '', status: '' },
@@ -598,6 +599,12 @@
         state.mirrorStatsLoading = false;
         /* 首次进入设置页时统计块可能还没渲染出来（接口返回比首屏慢），补一次渲染 */
         if (state.route === 'settings' && mirrorStatsInnerHtml() && !document.getElementById('mirror-stats-body')) {
+          renderIfActive('settings');
+        }
+        /* 首屏渲染时还不知道本机 IP（用上了 localhost），统计到手后补一次渲染换成真实地址；
+           用户已经改过表单就不重建 DOM，避免丢输入 */
+        if (state.route === 'settings' && state.mirrorAddrStale && !state.settingsDirty) {
+          state.mirrorAddrStale = false;
           renderIfActive('settings');
         }
         setMirrorStatsBody();
@@ -1273,11 +1280,38 @@
     });
   }
 
-  function mirrorAddressLabel() {
+  function isLoopbackHostname(host) {
+    const h = String(host || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+    if (!h) return true;
+    if (h === 'localhost' || h.slice(-10) === '.localhost') return true;
+    if (h === '::1' || h === '0.0.0.0') return true;
+    return h.slice(0, 4) === '127.';
+  }
+
+  /* 客户端该用哪个地址：浏览器地址栏不是回环地址就用它，否则用后端探测到的局域网 IP */
+  function mirrorClientAddresses() {
+    const list = [];
+    const push = function (value) {
+      const v = String(value || '').trim();
+      if (v && list.indexOf(v) < 0) list.push(v);
+    };
     try {
-      if (location && location.host) return location.host;
+      if (!isLoopbackHostname(location.hostname)) push(location.host);
     } catch (err) { /* ignore */ }
-    return '本机地址:端口';
+    const data = state.mirrorStats;
+    if (data && Array.isArray(data.localAddresses)) {
+      for (let i = 0; i < data.localAddresses.length; i += 1) push(data.localAddresses[i]);
+    }
+    if (!list.length) {
+      try { push(location.host); } catch (err) { /* ignore */ }
+    }
+    if (!list.length) push('服务器IP:端口');
+    return list;
+  }
+
+  function mirrorAddressLabel() {
+    const list = mirrorClientAddresses();
+    return list.length ? list[0] : '服务器IP:端口';
   }
 
   function mirrorStatsInnerHtml() {
@@ -1334,11 +1368,23 @@
     const cfg = d.mirror || {};
     const upstreams = Array.isArray(cfg.upstreams) && cfg.upstreams.length ? cfg.upstreams : ['docker.io'];
     const ttl = Number.isFinite(Number(cfg.tagTtlMinutes)) ? Number(cfg.tagTtlMinutes) : 60;
-    const address = mirrorAddressLabel();
-    const snippet = '# 直接当镜像站用\n' +
+    const addresses = mirrorClientAddresses();
+    const address = addresses.length ? addresses[0] : '服务器IP:端口';
+    /* 这一屏是不是用回环地址凑的（等统计接口回来再重渲染） */
+    state.mirrorAddrStale = !addresses.length || (isLoopbackHostname(location.hostname) && address === location.host);
+    const others = addresses.slice(1);
+    const daemonExample = '{\n' +
+      '  "registry-mirrors": ["http://' + address + '"],\n' +
+      '  "insecure-registries": ["' + address + '"]\n' +
+      '}';
+    const snippet = '# 1) 直接当镜像站用（其它机器要用本机 IP，localhost 只在服务这台机器上有效）\n' +
       'docker pull ' + address + '/library/alpine:3.20\n\n' +
-      '# 当 Docker Hub 加速器用（daemon.json，仅对 Docker Hub 生效）\n' +
-      '"registry-mirrors": ["http://' + address + '"]';
+      '# 2) 当 Docker Hub 加速器用：daemon.json（Docker Desktop 在「设置 → Docker Engine」里改）\n' +
+      daemonExample;
+    const hint = '本服务是明文 HTTP：docker 客户端默认先试 HTTPS，没登记 insecure-registries 就会报 ' +
+      '「http: server gave HTTP response to HTTPS client」。' +
+      (others.length ? '本机其它可用地址：' + others.join('、') + '。' : '') +
+      '在别的机器上请把上面的 ' + address + ' 换成这台服务器的实际 IP（用 ipconfig / ip addr 查看）。';
 
     return '<section class="card card-pad"><div class="card-head">' +
       '<h3>镜像加速（Registry 镜像站）</h3>' +
@@ -1359,7 +1405,7 @@
       '</div>' +
       '<div class="field mirror-snippet-field"><label>客户端用法</label>' +
       '<pre class="mirror-snippet"><code>' + esc(snippet) + '</code></pre>' +
-      '<span class="field-hint">明文 HTTP 需要在 docker 的 insecure-registries 里登记该地址。</span></div>' +
+      '<span class="field-hint">' + esc(hint) + '</span></div>' +
       mirrorStatsBlockHtml() +
       '</section>';
   }

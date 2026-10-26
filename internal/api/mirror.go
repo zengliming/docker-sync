@@ -2,7 +2,10 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 
 	"docker-sync/internal/mirror"
@@ -81,10 +84,83 @@ func (s *Server) handleMirrorStats(w http.ResponseWriter, r *http.Request) {
 		stats = s.mirror.Stats()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":       cfg.Enabled,
-		"allowAll":      cfg.AllowAll,
-		"upstreams":     cfg.Upstreams,
-		"tagTtlMinutes": cfg.TagTTLMinutes,
-		"stats":         stats,
+		"enabled":        cfg.Enabled,
+		"allowAll":       cfg.AllowAll,
+		"upstreams":      cfg.Upstreams,
+		"tagTtlMinutes":  cfg.TagTTLMinutes,
+		"localAddresses": mirrorLocalAddresses(r),
+		"stats":          stats,
 	})
+}
+
+// mirrorLocalAddresses lists the addresses a docker client can use to reach this
+// mirror. The address the browser itself was opened with wins; when that is a
+// loopback name (localhost / 127.0.0.1) the local non-loopback IPv4 addresses are
+// added instead, because localhost only works on the very same machine.
+func mirrorLocalAddresses(r *http.Request) []string {
+	port := "8080"
+	if _, p, err := net.SplitHostPort(r.Host); err == nil && p != "" {
+		port = p
+	}
+	seen := make(map[string]bool, 4)
+	out := make([]string, 0, 4)
+	add := func(addr string) {
+		if addr == "" || seen[addr] {
+			return
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if !loopbackHost(host) {
+		add(r.Host)
+	}
+
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ipnet, ok := a.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				ip := ipnet.IP.To4()
+				if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+					continue
+				}
+				add(net.JoinHostPort(ip.String(), port))
+			}
+		}
+	}
+
+	if len(out) == 0 {
+		add(r.Host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func loopbackHost(host string) bool {
+	h := strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if h == "" {
+		return true
+	}
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
