@@ -253,6 +253,35 @@ services:
 - 改完配置建议先用页面上的「测试连通性」验证，再触发同步；同步失败时日志里会记录
   `镜像 <ref>: registry: ...` 的具体网络错误。
 
+### 5.5 镜像加速站点
+
+开启「设置 → 镜像加速」后，本服务在同一个端口上额外提供 Registry v2 只读接口（`/v2/`），
+可以直接给内网的 docker 客户端当加速站用。
+
+客户端配置（把 `192.168.1.10:8080` 换成实际地址）：
+
+```json
+{
+  "registry-mirrors": ["http://192.168.1.10:8080"],
+  "insecure-registries": ["192.168.1.10:8080"]
+}
+```
+
+- `registry-mirrors` 只对 Docker Hub 生效；要加速 `ghcr.io`、`quay.io` 等其他上游，
+  改成显式拉取：`docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1`（需把 `ghcr.io` 加进上游白名单）。
+- 本服务不带 TLS，必须登记 `insecure-registries`。想避免这一项，在前面挂一层带证书的反向代理
+  （见 5.1 Nginx / 5.2 Caddy），再把加速地址写成 `https://mirror.example.com`。
+- 反向代理需要放开大文件与长连接，建议 `proxy_request_buffering off;`、`client_max_body_size 0;`，
+  并保留 `Range` 头（Nginx 默认透传）。
+- 白名单：`allowAll` 关闭时只代理列表里的上游（默认 `docker.io`），避免成为开放代理；
+  内网使用时建议保持关闭。
+- 存储：加速缓存写入同一个数据目录的 blob 缓存，受「blob 缓存上限 / 过期天数」约束，
+  定期清理可回收空间；存量 tar 不受影响。
+- 排障：
+  - `docker pull` 报 `http: server gave HTTP response to HTTPS client` → 没加 `insecure-registries`。
+  - 报 `manifest unknown` → 上游白名单里没有该 host，或上游确实没有这个 tag。
+  - 报 429 / `toomanyrequests` → 上游限流，给对应 host 配置「仓库凭据」，或改用内网镜像站做上游。
+
 ## 6. 数据备份与升级
 
 ### 6.1 备份

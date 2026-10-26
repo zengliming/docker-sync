@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"docker-sync/internal/cas"
+	"docker-sync/internal/mirror"
 	"docker-sync/internal/model"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
@@ -45,6 +46,10 @@ type Options struct {
 	Version   string
 	StartedAt time.Time
 	Logger    *slog.Logger
+	// MirrorUpstreams overrides the registry client pool used by the
+	// pull-through mirror. Tests inject a fake; nil means "talk to the real
+	// upstreams through the store settings".
+	MirrorUpstreams mirror.Upstreams
 }
 
 // Server is the HTTP front end of the service.
@@ -56,6 +61,8 @@ type Server struct {
 	web    fs.FS
 	static fs.FS
 	index  []byte
+
+	mirror *mirror.Server
 
 	version   string
 	startedAt time.Time
@@ -107,6 +114,22 @@ func New(opts Options) (*Server, error) {
 	}
 	s.hub = newHub(logger)
 	opts.Store.SetNotifier(s.hub.Publish)
+	if opts.Blobs != nil {
+		upstreams := opts.MirrorUpstreams
+		if upstreams == nil {
+			upstreams = newUpstreamPool(opts.Store)
+		}
+		if m, err := mirror.New(mirror.Options{
+			Settings:  opts.Store.SnapshotSettings,
+			Blobs:     opts.Blobs,
+			Upstreams: upstreams,
+			Logger:    logger,
+		}); err == nil {
+			s.mirror = m
+		} else {
+			s.log.Warn("镜像加速站点初始化失败", "error", err)
+		}
+	}
 	return s, nil
 }
 
@@ -143,6 +166,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	mux.HandleFunc("POST /api/settings/proxy-test", s.handleProxyTest)
+	mux.HandleFunc("GET /api/mirror/stats", s.handleMirrorStats)
+
+	mux.HandleFunc("/v2/", s.handleRegistryV2)
+	mux.HandleFunc("/v2", s.handleRegistryV2)
 
 	mux.HandleFunc("/api/", s.handleAPINotFound)
 
@@ -323,6 +350,12 @@ func (g *gzipResponseWriter) Close() {
 // withGzip enables compression for clients that ask for it.
 func withGzip(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The Registry v2 endpoints answer with exact Content-Length and support
+		// range requests, so they bypass the gzip layer entirely.
+		if strings.HasPrefix(r.URL.Path, "/v2/") || r.URL.Path == "/v2" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") || r.Header.Get("Range") != "" {
 			next.ServeHTTP(w, r)
 			return

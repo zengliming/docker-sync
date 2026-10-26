@@ -103,6 +103,29 @@ func (s *Store) Size(digest string) (int64, error) {
 	return st.Size(), nil
 }
 
+// OpenFile opens the blob as a seekable file together with its size. It exists
+// so HTTP handlers can serve blobs with range requests and conditional headers
+// through http.ServeContent.
+func (s *Store) OpenFile(digest string) (*os.File, int64, error) {
+	p, err := s.Path(digest)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, fmt.Errorf("cas: blob %s not found: %w", digest, err)
+		}
+		return nil, 0, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	return f, st.Size(), nil
+}
+
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader

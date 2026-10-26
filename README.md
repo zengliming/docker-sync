@@ -24,6 +24,7 @@ docker-sync 只做「拉取 → 缓存 → 打包 → 下载」，**不支持 pu
 - **docker save 兼容产物**：`manifest.json` + `<config>.json` + `<layerdigest>/layer.tar`，层已解压为 `layer.tar`，`docker load -i` 可直接加载；发布前会重新读取归档做完整性校验。
 - **任务级保留策略**：每个任务保留最近 N 份 tar（`keepVersions`，1–50，默认 3），旧文件自动清理。
 - **私有仓库认证**：设置页按 host 配置用户名/密码，支持 Basic 与 Bearer token challenge；局域网明文 HTTP registry 可勾选 `insecure`。
+- **镜像加速站点**：开启后自身即是一套只读的 Registry v2 pull-through 缓存，docker 客户端可直接 `docker pull 本服务地址/library/alpine:3.20`，与同步任务共享 blob 缓存。
 - **可观测性**：运行记录包含阶段、下载字节数、复用 blob 数、逐行日志（最多 500 行）；仪表盘汇总任务、tar、blob 缓存占用。
 - **零外部依赖运行**：前端与静态资源全部编译进二进制；运行镜像仅需 CA 证书和时区数据。
 - **状态持久化**：`state.json` 原子写入（临时文件 + fsync + rename），异常退出后可恢复；损坏时自动备份为 `state.json.broken` 并以默认设置启动。
@@ -231,6 +232,7 @@ Web 控制台「设置」页里还有一组运行时配置，保存在 `state.js
 | `blobCacheMaxAgeDays` | `7` | 1–365 | blob 缓存最长保留天数 |
 | `registries` | 空 | — | 私有仓库凭据，见下文 |
 | `proxyUrl` / `noProxy` | 空 | — | 网络代理，见「网络代理」一节 |
+| `mirror` | 关闭 | — | 镜像加速站点（只读 pull-through 缓存），见「镜像加速站点」一节 |
 
 ## 数据目录结构
 
@@ -333,6 +335,46 @@ data/
 - 容器部署也可以用环境变量让容器内进程走代理（见 docs/DEPLOY.md）：
   `HTTP_PROXY=http://host.docker.internal:7890`、`NO_PROXY=localhost,127.0.0.1`。
   环境变量对进程内所有出站请求生效，页面设置只作用于 registry 请求且优先级更高。
+
+## 镜像加速站点
+
+本服务还能当**内网的 Docker 镜像加速站**用：开启后 `/v2/` 就是一套只读的 Registry v2 pull-through 缓存，
+docker 客户端直接拉取，第一次回源、之后命中本地 blob 缓存。它和同步任务共用同一份 blob 缓存，
+所以给 CI 用过的镜像，同步任务不需要重新下载（反之亦然）。
+
+控制台「设置」→「镜像加速」：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| 启用镜像加速站点 | 关 | 打开后 `http://<本服务地址>/v2/` 对外提供 Registry v2 读接口 |
+| 允许代理任意上游仓库 | 关 | 关闭时只服务下面列出的上游；打开后请求路径首段看起来是主机名（含 `.` 或 `:`）就按该主机回源 |
+| 允许的上游仓库 | `docker.io` | 每行一个主机名，**第一行是默认上游**；不在列表里的名称整体作为默认上游的仓库名 |
+| tag 缓存时长 | 60 分钟 | tag → digest 映射的复用时长，过期后向上游确认 tag 是否移动 |
+
+客户端两种用法（把 `192.168.1.10:8080` 换成实际地址）：
+
+```bash
+# 1) 直接当仓库地址用，任何客户端都支持
+docker pull 192.168.1.10:8080/library/alpine:3.20
+docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在白名单里
+
+# 2) 给整个 daemon 配镜像加速（只对 Docker Hub 生效）
+#    /etc/docker/daemon.json
+#    {"registry-mirrors": ["http://192.168.1.10:8080"],
+#     "insecure-registries": ["192.168.1.10:8080"]}
+```
+
+- 本服务不带 TLS，所以客户端要把它登记进 `insecure-registries`；想省掉这一步就在前面挂一层带证书的
+  Nginx/Caddy（见 docs/DEPLOY.md）。
+- 只读：`docker push`、`blobs/uploads`、`tags/list` 都不支持（返回 405/404）。
+- 安全：`allowAll` 关闭时只有白名单内的上游会被代理，避免变成公开的开放代理；建议内网使用时保持关闭，
+  只列出真正需要的上游。服务本身**没有鉴权**，不要把端口直接暴露到公网。
+- 上游限流（Docker Hub 429）会原样透传给客户端；配置「仓库凭据」可以让回源带账号，缓解限流。
+- 代理与仓库凭据同样作用于镜像加速的回源请求（manifest、blob、token 都走同一个客户端），
+  并且「设置 → 网络代理」保存后立即生效。
+- 存储：缓存按 blob 摘要去重，遵守「blob 缓存上限 / 过期天数」，超过后由清理任务回收。
+- 「镜像加速」卡片底部有实时统计（manifest/blob 命中与回源、累计下发字节），对应接口
+  `GET /api/mirror/stats`。
 
 ## 私有仓库认证
 

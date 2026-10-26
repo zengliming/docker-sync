@@ -1161,6 +1161,99 @@ textarea.input { min-height: 84px; resize: vertical; }
 
 .proxy-test-meta { font-size: 11.5px; opacity: 0.86; }
 
+/* registry mirror (镜像加速) */
+
+.mirror-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.mirror-snippet-field { margin-top: 16px; }
+
+.mirror-snippet {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0a0f16;
+  color: #b9c9db;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: -0.01em;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.mirror-snippet code {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  word-break: normal;
+}
+
+.mirror-stats {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(11, 18, 27, 0.6);
+}
+
+.mirror-stats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mirror-stats-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+
+.mirror-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px 20px;
+}
+
+.mirror-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mirror-stat-label {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.mirror-stat-value {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.mirror-stats-note { font-size: 12px; color: var(--faint); line-height: 1.6; }
+.mirror-stats-note.is-muted { color: #6b7c91; }
+
 /* ------------------------------------------------------------------ toast */
 
 .toast-root {

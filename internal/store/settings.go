@@ -9,6 +9,12 @@ import (
 // defaultSettings returns the documented defaults used on a fresh data dir.
 func defaultSettings() model.Settings {
 	return model.Settings{
+		Mirror: model.MirrorSettings{
+			Enabled:       false,
+			AllowAll:      false,
+			Upstreams:     []string{defaultMirrorUpstream},
+			TagTTLMinutes: 60,
+		},
 		DefaultPlatform:        "linux/amd64",
 		MaxConcurrentRuns:      2,
 		MaxConcurrentDownloads: 4,
@@ -17,6 +23,9 @@ func defaultSettings() model.Settings {
 		Registries:             []model.RegistryAuth{},
 	}
 }
+
+// defaultMirrorUpstream is the upstream used for requests that do not name one.
+const defaultMirrorUpstream = "docker.io"
 
 // GetSettings returns the current settings. Passwords are blanked out; the
 // HasPassword flag tells whether one is stored.
@@ -99,6 +108,7 @@ func normalizeRegistryHost(host string) string {
 func copySettings(in model.Settings) model.Settings {
 	out := in
 	out.Registries = append([]model.RegistryAuth(nil), in.Registries...)
+	out.Mirror.Upstreams = append([]string(nil), in.Mirror.Upstreams...)
 	return out
 }
 
@@ -176,5 +186,35 @@ func (s *Store) sanitizeSettingsLocked() {
 		set.Registries[i].Host = strings.TrimSpace(set.Registries[i].Host)
 		set.Registries[i].Username = strings.TrimSpace(set.Registries[i].Username)
 		set.Registries[i].ProxyURL = strings.TrimSpace(set.Registries[i].ProxyURL)
+	}
+	sanitizeMirrorLocked(&set.Mirror)
+}
+
+// sanitizeMirrorLocked normalises the mirror upstream allow-list and clamps the
+// tag cache TTL. It never enables the mirror on its own.
+func sanitizeMirrorLocked(m *model.MirrorSettings) {
+	seen := make(map[string]bool, len(m.Upstreams))
+	upstreams := make([]string, 0, len(m.Upstreams))
+	for _, raw := range m.Upstreams {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		host = strings.TrimSuffix(host, "/")
+		if host == "" || strings.ContainsAny(host, "/ @\\") || strings.Contains(host, "://") {
+			continue
+		}
+		if seen[host] {
+			continue
+		}
+		seen[host] = true
+		upstreams = append(upstreams, host)
+	}
+	if len(upstreams) == 0 {
+		upstreams = []string{defaultMirrorUpstream}
+	}
+	m.Upstreams = upstreams
+	if m.TagTTLMinutes <= 0 {
+		m.TagTTLMinutes = 60
+	}
+	if m.TagTTLMinutes > 1440 {
+		m.TagTTLMinutes = 1440
 	}
 }

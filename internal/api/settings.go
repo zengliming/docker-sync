@@ -34,6 +34,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sched.SettingsChanged()
+	if s.mirror != nil {
+		s.mirror.Invalidate()
+	}
 	writeJSON(w, http.StatusOK, saved)
 }
 
@@ -86,6 +89,30 @@ func validateSettings(in model.Settings) error {
 		if _, err := registry.ParseProxy(reg.ProxyURL); err != nil {
 			return fmt.Errorf("registries[%d]: %w", i, err)
 		}
+	}
+	return validateMirrorSettings(in.Mirror)
+}
+
+// validateMirrorSettings checks the mirror upstream allow-list. Omitted fields
+// are tolerated so that clients written before the mirror existed keep working:
+// the store fills in the documented defaults (docker.io, 60 minutes).
+func validateMirrorSettings(m model.MirrorSettings) error {
+	if m.TagTTLMinutes < 0 || m.TagTTLMinutes > 1440 {
+		return fmt.Errorf("mirror.tagTtlMinutes 必须在 1 到 1440 之间，当前 %d", m.TagTTLMinutes)
+	}
+	seen := make(map[string]struct{}, len(m.Upstreams))
+	for i, raw := range m.Upstreams {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		if host == "" {
+			return fmt.Errorf("mirror.upstreams[%d] 不能为空", i)
+		}
+		if strings.Contains(host, "://") || strings.ContainsAny(host, "/ @\\") {
+			return fmt.Errorf("mirror.upstreams[%d] %q 只能是主机名（可带端口），不能包含协议、路径或空格", i, raw)
+		}
+		if _, dup := seen[host]; dup {
+			return fmt.Errorf("mirror.upstreams 中存在重复的上游: %s", host)
+		}
+		seen[host] = struct{}{}
 	}
 	return nil
 }

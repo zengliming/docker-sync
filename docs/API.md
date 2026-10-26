@@ -222,6 +222,12 @@
   "blobCacheMaxAgeDays": 7,
   "proxyUrl": "",
   "noProxy": "",
+  "mirror": {
+    "enabled": false,
+    "allowAll": false,
+    "upstreams": ["docker.io"],
+    "tagTtlMinutes": 60
+  },
   "registries": [
     {"host":"docker.io","username":"","password":"","hasPassword":false,"insecure":false,"proxyUrl":""},
     {"host":"registry.local:5000","username":"admin","password":"","hasPassword":true,"insecure":true,"proxyUrl":""}
@@ -235,7 +241,9 @@
   传 `password` 会覆盖，`hasPassword=false` 且密码为空表示清空。`dataDir` 只读，忽略入参。
 - 校验：并发数 1–16，blobCacheMaxGB 1–1024，blobCacheMaxAgeDays 1–365，
   `defaultPlatform` 合法，registries 的 host 非空且不重复，
-  `proxyUrl` / `registries[].proxyUrl` 必须是合法代理地址，`noProxy` 条目只能是主机名。
+  `proxyUrl` / `registries[].proxyUrl` 必须是合法代理地址，`noProxy` 条目只能是主机名，
+  `mirror.upstreams` 只能是主机名（可带端口）且不重复，`mirror.tagTtlMinutes` 0–1440
+  （0 表示使用默认值 60）。
 
 ### 代理字段
 
@@ -268,6 +276,49 @@
 
 - 探不到时仍是 200，但 `ok:false` 且带 `error` 字段（如连接失败、代理认证失败 407）。
 - 入参非法（代理地址不合法、noProxy 含协议或路径、镜像引用无法解析）返回 400。
+
+### 镜像加速字段
+
+| 字段 | 语义 |
+| --- | --- |
+| `enabled` | 打开后本服务的 `/v2/` 变成只读 pull-through 缓存，docker 客户端可直接拉取 |
+| `allowAll` | `true` = 允许代理任意上游（按请求路径首段识别主机名）；`false` = 只服务 `upstreams` 中列出的上游，首段未匹配的名称整体作为默认上游的仓库名 |
+| `upstreams` | 允许的上游主机名列表，**第一条是默认上游**；空数组按 `["docker.io"]` 处理 |
+| `tagTtlMinutes` | tag → digest 映射的缓存时长（0–1440，0 表示默认 60）；过期后重新向上游确认 tag 是否移动 |
+
+- 保存设置后立即生效，同时清空 tag 缓存（blob 与 manifest 缓存保留）。
+- 镜像加速与同步任务共用同一份 blob 缓存，因此「blob 缓存上限 / 过期天数」对它同样生效。
+
+### 镜像加速统计
+
+`GET /api/mirror/stats` → 200
+
+```json
+{
+  "enabled": true,
+  "allowAll": false,
+  "upstreams": ["docker.io"],
+  "tagTtlMinutes": 60,
+  "stats": {"manifestHits": 12, "manifestMisses": 3, "blobHits": 40, "blobMisses": 8, "bytesServed": 12345678}
+}
+```
+
+## 镜像加速站点（Registry v2）
+
+docker 客户端把本服务当作镜像仓库访问，接口遵循 Registry v2：
+
+| 请求 | 行为 |
+| --- | --- |
+| `GET /v2/` | 200 `{}`，带 `Docker-Distribution-Api-Version: registry/2.0`；未启用时 404 |
+| `GET`/`HEAD /v2/<name>/manifests/<tag\|digest>` | 原样透传上游 manifest（包括 image index，不改写平台），带 `Docker-Content-Digest` |
+| `GET`/`HEAD /v2/<name>/blobs/<digest>` | 命中缓存直接下发并支持 `Range`；未命中时边下边写缓存；HEAD 只回长度不回源全量 |
+| 其他方法 | `POST`/`PUT`/`PATCH` 一律 405（只读缓存，不支持 push） |
+| 其他路径 | `/v2/<name>/tags/list`、`/v2/<name>/blobs/uploads/` 等返回 404/405 |
+
+- `<name>` 的首段命中 `mirror.upstreams` 时按该上游解析，否则整体作为默认上游的仓库名：
+  `library/alpine` → `docker.io/library/alpine`，`ghcr.io/owner/app`（`ghcr.io` 在白名单内）→ 上游 `ghcr.io`。
+- 错误体遵循 Registry 规范：`{"errors":[{"code":"MANIFEST_UNKNOWN","message":"..."}]}`，状态码 400/404/405/502。
+- `/v2/` 路径不经过 gzip 中间件，响应带精确的 `Content-Length`，`Range` 与条件请求原样支持。
 
 ## 静态页面
 

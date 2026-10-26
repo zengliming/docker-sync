@@ -33,6 +33,12 @@ func (c *Client) url(ref Ref, path string) string {
 // open body; the caller must close it. Non-2xx responses are returned as-is so
 // callers can include the registry error body in their own error messages.
 func (c *Client) do(ctx context.Context, ref Ref, rawURL string, accept []string) (*http.Response, error) {
+	return c.doMethod(ctx, http.MethodGet, ref, rawURL, accept)
+}
+
+// doMethod is do for an arbitrary HTTP method. HEAD requests are used to probe
+// blob existence without transferring the payload.
+func (c *Client) doMethod(ctx context.Context, method string, ref Ref, rawURL string, accept []string) (*http.Response, error) {
 	const maxAttempts = 4
 	authTried := false
 	attempt := 0
@@ -41,7 +47,7 @@ func (c *Client) do(ctx context.Context, ref Ref, rawURL string, accept []string
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("registry: build request: %w", err)
 		}
@@ -63,7 +69,7 @@ func (c *Client) do(ctx context.Context, ref Ref, rawURL string, accept []string
 			}
 			lastErr = err
 			if attempt >= maxAttempts-1 {
-				return nil, fmt.Errorf("registry: GET %s: %w", rawURL, lastErr)
+				return nil, fmt.Errorf("registry: %s %s: %w", method, rawURL, lastErr)
 			}
 			attempt++
 			if err := sleepCtx(ctx, backoff(attempt)); err != nil {

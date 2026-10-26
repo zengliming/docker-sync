@@ -56,6 +56,9 @@
     settingsDraft: null,
     settingsDirty: false,
     proxyTest: null,
+    mirrorStats: null,
+    mirrorStatsLoading: false,
+    mirrorStatsError: null,
     loading: { overview: false, tasks: false, runs: false, files: false, settings: false },
     errors: { overview: null, tasks: null, runs: null, files: null, settings: null },
     runFilter: { taskId: '', status: '' },
@@ -520,8 +523,23 @@
         proxyUrl: r && typeof r.proxyUrl === 'string' ? r.proxyUrl : ''
       };
     }) : [];
+    /* 老后端可能不返回 mirror，这里逐字段兜底默认值 */
+    const mirrorSrc = d.mirror && typeof d.mirror === 'object' ? d.mirror : {};
+    const mirrorUpstreams = Array.isArray(mirrorSrc.upstreams) ? mirrorSrc.upstreams.map(function (host) {
+      return typeof host === 'string' ? host.trim() : '';
+    }).filter(function (host) {
+      return host !== '';
+    }) : [];
+    const mirrorTtl = parseInt(String(mirrorSrc.tagTtlMinutes), 10);
+    const mirror = {
+      enabled: !!mirrorSrc.enabled,
+      allowAll: !!mirrorSrc.allowAll,
+      upstreams: mirrorUpstreams.length ? mirrorUpstreams : ['docker.io'],
+      tagTtlMinutes: isFinite(mirrorTtl) ? Math.min(1440, Math.max(1, mirrorTtl)) : 60
+    };
     return {
       smb: Object.assign({ enabled: false, share: '', directory: '', username: '', password: '', hasPassword: false, domain: '' }, d.smb || {}, { password: '' }),
+      mirror: mirror,
       defaultPlatform: typeof d.defaultPlatform === 'string' ? d.defaultPlatform : '',
       proxyUrl: typeof d.proxyUrl === 'string' ? d.proxyUrl : '',
       noProxy: typeof d.noProxy === 'string' ? d.noProxy : '',
@@ -559,6 +577,34 @@
     }
   }
 
+  async function loadMirrorStats(silent) {
+    const token = nextToken('mirrorStats');
+    if (!silent) {
+      state.mirrorStatsLoading = true;
+      setMirrorStatsBody();
+    }
+    try {
+      const data = await api('/api/mirror/stats');
+      if (!isCurrent('mirrorStats', token)) return;
+      state.mirrorStats = data && typeof data === 'object' ? data : null;
+      state.mirrorStatsError = null;
+    } catch (err) {
+      if (!isCurrent('mirrorStats', token)) return;
+      /* 统计接口不可用（404 / 500 / 老后端）时不影响设置页，整块静默隐藏 */
+      state.mirrorStats = null;
+      state.mirrorStatsError = err && err.message ? err.message : '统计接口不可用';
+    } finally {
+      if (isCurrent('mirrorStats', token)) {
+        state.mirrorStatsLoading = false;
+        /* 首次进入设置页时统计块可能还没渲染出来（接口返回比首屏慢），补一次渲染 */
+        if (state.route === 'settings' && mirrorStatsInnerHtml() && !document.getElementById('mirror-stats-body')) {
+          renderIfActive('settings');
+        }
+        setMirrorStatsBody();
+      }
+    }
+  }
+
   async function loadRunDetail(id, silent) {
     if (!state.drawerRunId || state.drawerRunId !== id) return;
     try {
@@ -584,7 +630,7 @@
       case 'tasks': loadTasks(silent); break;
       case 'runs': loadRuns(silent); break;
       case 'files': loadFiles(silent); ensureSettingsForFiles(); break;
-      case 'settings': loadSettings(silent, false); break;
+      case 'settings': loadSettings(silent, false); loadMirrorStats(silent); break;
       default: break;
     }
   }
@@ -607,7 +653,7 @@
       case 'tasks': await loadTasks(false); break;
       case 'runs': await loadRuns(false); break;
       case 'files': await loadFiles(false); break;
-      case 'settings': await loadSettings(false, false); break;
+      case 'settings': await loadSettings(false, false); await loadMirrorStats(false); break;
       default: break;
     }
   }
@@ -1219,6 +1265,126 @@
     return cfg;
   }
 
+  function parseMirrorUpstreams(text) {
+    return String(text === null || text === undefined ? '' : text).split(/[\r\n]+/).map(function (line) {
+      return line.trim();
+    }).filter(function (line) {
+      return line !== '';
+    });
+  }
+
+  function mirrorAddressLabel() {
+    try {
+      if (location && location.host) return location.host;
+    } catch (err) { /* ignore */ }
+    return '本机地址:端口';
+  }
+
+  function mirrorStatsInnerHtml() {
+    if (state.mirrorStatsLoading && !state.mirrorStats) {
+      return '<div class="mirror-stats-note">统计加载中…</div>';
+    }
+    const data = state.mirrorStats;
+    if (!data) return '';
+    if (!data.enabled) {
+      return '<div class="mirror-stats-note is-muted">镜像加速未启用</div>';
+    }
+    const st = data.stats && typeof data.stats === 'object' ? data.stats : {};
+    const row = function (label, hits, misses) {
+      return '<div class="mirror-stat"><span class="mirror-stat-label">' + esc(label) + '</span>' +
+        '<span class="mirror-stat-value">命中 ' + esc(String(num(hits))) + ' / 回源 ' + esc(String(num(misses))) + '</span></div>';
+    };
+    return '<div class="mirror-stats-grid">' +
+      row('manifest', st.manifestHits, st.manifestMisses) +
+      row('blob', st.blobHits, st.blobMisses) +
+      '<div class="mirror-stat"><span class="mirror-stat-label">累计下发</span>' +
+      '<span class="mirror-stat-value">' + esc(fmtBytes(st.bytesServed)) + '</span></div>' +
+      '</div>';
+  }
+
+  /* 统计接口不可用时返回空串，整块在页面上静默隐藏 */
+  function mirrorStatsBlockHtml() {
+    const inner = mirrorStatsInnerHtml();
+    if (!inner) return '';
+    return '<div class="mirror-stats" id="mirror-stats">' +
+      '<div class="mirror-stats-head"><span class="mirror-stats-title">镜像加速统计</span>' +
+      btn('刷新统计', 'mirror-stats-refresh', { cls: 'btn-ghost', size: 'sm' }) +
+      '</div><div id="mirror-stats-body">' + inner + '</div></div>';
+  }
+
+  function setMirrorStatsBody() {
+    const box = document.getElementById('mirror-stats-body');
+    if (!box) return;
+    const inner = mirrorStatsInnerHtml();
+    /* 拉取失败时保留上一次成功的数据，不在页面上闪空 */
+    if (!inner) return;
+    box.innerHTML = inner;
+  }
+
+  async function refreshMirrorStats(button) {
+    setBusy(button, true, '刷新中…');
+    try {
+      await loadMirrorStats(false);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  function mirrorSettingsHtml(d) {
+    const cfg = d.mirror || {};
+    const upstreams = Array.isArray(cfg.upstreams) && cfg.upstreams.length ? cfg.upstreams : ['docker.io'];
+    const ttl = Number.isFinite(Number(cfg.tagTtlMinutes)) ? Number(cfg.tagTtlMinutes) : 60;
+    const address = mirrorAddressLabel();
+    const snippet = '# 直接当镜像站用\n' +
+      'docker pull ' + address + '/library/alpine:3.20\n\n' +
+      '# 当 Docker Hub 加速器用（daemon.json，仅对 Docker Hub 生效）\n' +
+      '"registry-mirrors": ["http://' + address + '"]';
+
+    return '<section class="card card-pad"><div class="card-head">' +
+      '<h3>镜像加速（Registry 镜像站）</h3>' +
+      '<p>开启后本服务对 docker 客户端提供只读的镜像加速（pull-through cache）：既能直接当镜像站拉取，也能配置为 Docker Hub 加速器。</p></div>' +
+      '<div class="mirror-toggles">' +
+      '<label class="check"><input type="checkbox" name="mirrorEnabled"' + (cfg.enabled ? ' checked' : '') +
+      '><span>启用镜像加速站点</span></label>' +
+      '<label class="check"><input type="checkbox" name="mirrorAllowAll"' + (cfg.allowAll ? ' checked' : '') +
+      '><span>允许代理任意上游仓库<small>关闭时只允许下方列出的上游仓库</small></span></label>' +
+      '</div>' +
+      '<div class="settings-grid">' +
+      '<div class="field"><label for="mirror-upstreams">允许的上游仓库（每行一个，第一行为默认上游）</label>' +
+      '<textarea class="input mono" id="mirror-upstreams" name="mirrorUpstreams" rows="5" spellcheck="false" ' +
+      'placeholder="docker.io / ghcr.io / registry.example.com:5000">' + esc(upstreams.join('\n')) + '</textarea>' +
+      '<span class="field-hint">只填 host 或 host:port，不要带协议头与路径；请求未写上游前缀时按第一行解析。</span></div>' +
+      settingNumberField('mirrorTagTtlMinutes', 'tag 缓存时长（分钟）', ttl, 1, 1440,
+        'tag → digest 的复用时长（1–1440 分钟），过期后回源确认 tag 是否变动。') +
+      '</div>' +
+      '<div class="field mirror-snippet-field"><label>客户端用法</label>' +
+      '<pre class="mirror-snippet"><code>' + esc(snippet) + '</code></pre>' +
+      '<span class="field-hint">明文 HTTP 需要在 docker 的 insecure-registries 里登记该地址。</span></div>' +
+      mirrorStatsBlockHtml() +
+      '</section>';
+  }
+
+  function captureMirror(form, previous) {
+    const prev = previous && typeof previous === 'object' ? previous : {};
+    const enabledInput = form.querySelector('[name="mirrorEnabled"]');
+    const allowAllInput = form.querySelector('[name="mirrorAllowAll"]');
+    const upstreamsInput = form.querySelector('[name="mirrorUpstreams"]');
+    const ttlInput = form.querySelector('[name="mirrorTagTtlMinutes"]');
+    const upstreams = parseMirrorUpstreams(upstreamsInput ? upstreamsInput.value : '');
+    const ttl = parseInt(String(ttlInput ? ttlInput.value : '').trim(), 10);
+    return {
+      enabled: !!(enabledInput && enabledInput.checked),
+      allowAll: !!(allowAllInput && allowAllInput.checked),
+      /* 空列表时保留原值（“添加仓库”等中间态会先 capture 一次表单） */
+      upstreams: upstreams.length
+        ? upstreams
+        : (Array.isArray(prev.upstreams) && prev.upstreams.length ? prev.upstreams.slice() : ['docker.io']),
+      tagTtlMinutes: isFinite(ttl)
+        ? Math.min(1440, Math.max(1, ttl))
+        : (Number.isFinite(Number(prev.tagTtlMinutes)) ? Number(prev.tagTtlMinutes) : 60)
+    };
+  }
+
   function renderSettings() {
     const head = pageHead('设置', '服务参数、缓存策略与仓库凭据', btn('刷新', 'refresh', { cls: 'btn-ghost' }));
 
@@ -1253,13 +1419,6 @@
       '<span class="field-hint">只读，由服务启动参数决定。</span></div>' +
       '</div></section>' +
       '<section class="card card-pad">' +
-      '<div class="card-head"><h3>仓库凭据</h3><p>用于拉取私有镜像仓库。密码仅提交给服务端，读取接口只返回是否已设置。</p></div>' +
-      '<div class="table-wrap"><table class="table registry-table"><thead><tr>' +
-      '<th>仓库地址</th><th>用户名</th><th>密码</th><th>代理</th><th class="center">明文 HTTP</th><th class="right">操作</th>' +
-      '</tr></thead><tbody>' + registryRowsHtml(d.registries || []) + '</tbody></table></div>' +
-      '<div class="section-actions"><button type="button" class="btn btn-ghost" data-action="registry-add">＋ 添加仓库</button></div>' +
-      '</section>' +
-      '<section class="card card-pad">' +
       '<div class="card-head"><h3>网络代理</h3><p>拉取镜像时使用的出站代理。留空表示跟随服务端 HTTP_PROXY / HTTPS_PROXY 环境变量。</p></div>' +
       '<div class="settings-grid">' +
       '<div class="field"><label for="settings-proxy-url">代理地址</label>' +
@@ -1278,6 +1437,14 @@
       btn('测试连通性', 'proxy-test', { cls: 'btn-ghost' }) +
       '</div>' +
       '<div id="proxy-test-result">' + proxyTestHtml() + '</div>' +
+      '</section>' +
+      mirrorSettingsHtml(d) +
+      '<section class="card card-pad">' +
+      '<div class="card-head"><h3>仓库凭据</h3><p>用于拉取私有镜像仓库。密码仅提交给服务端，读取接口只返回是否已设置。</p></div>' +
+      '<div class="table-wrap"><table class="table registry-table"><thead><tr>' +
+      '<th>仓库地址</th><th>用户名</th><th>密码</th><th>代理</th><th class="center">明文 HTTP</th><th class="right">操作</th>' +
+      '</tr></thead><tbody>' + registryRowsHtml(d.registries || []) + '</tbody></table></div>' +
+      '<div class="section-actions"><button type="button" class="btn btn-ghost" data-action="registry-add">＋ 添加仓库</button></div>' +
       '</section>' +
       '</div>' +
       '<div class="form-actions"><button type="submit" class="btn btn-primary">保存设置</button></div>' +
@@ -1398,7 +1565,12 @@
     state.route = next;
     updateChrome();
     if (changed) closeDrawer();
-    if (changed && next !== 'settings') state.proxyTest = null;
+    if (changed && next !== 'settings') {
+      state.proxyTest = null;
+      state.mirrorStats = null;
+      state.mirrorStatsLoading = false;
+      state.mirrorStatsError = null;
+    }
     render();
     loadRouteData(next, routeHasData(next));
   }
@@ -1732,6 +1904,8 @@
 
     draft.smb = captureSMB(form, draft.smb);
 
+    draft.mirror = captureMirror(form, draft.mirror);
+
     ['proxyUrl', 'noProxy'].forEach(function (key) {
       const input = form.querySelector('[name="' + key + '"]');
       if (input) draft[key] = input.value;
@@ -1795,6 +1969,7 @@
         proxyUrl: String(fd.get('proxyUrl') || '').trim(),
         noProxy: String(fd.get('noProxy') || '').trim(),
         smb: captureSMB(form, state.settingsDraft.smb),
+        mirror: { enabled: false, allowAll: false, upstreams: ['docker.io'], tagTtlMinutes: 60 },
         registries: []
       };
       numberFields.forEach(function (field) {
@@ -1805,6 +1980,33 @@
         }
         payload[field.name] = value;
       });
+
+      /* 镜像加速：PUT 必须完整回传 mirror，否则后端会把配置清空 */
+      const mirrorUpstreams = parseMirrorUpstreams(fd.get('mirrorUpstreams'));
+      if (!mirrorUpstreams.length) {
+        focusField('mirror-upstreams');
+        throw new Error('请至少填写一个上游仓库（第一行为默认上游）');
+      }
+      for (let i = 0; i < mirrorUpstreams.length; i += 1) {
+        const host = mirrorUpstreams[i];
+        if (/[\s/\\@]/.test(host) || host.indexOf('://') !== -1) {
+          focusField('mirror-upstreams');
+          throw new Error('上游仓库只写 host 或 host:port，不要带协议与路径：' + host);
+        }
+      }
+      const mirrorTtl = parseInt(String(fd.get('mirrorTagTtlMinutes') || '').trim(), 10);
+      if (!isFinite(mirrorTtl) || mirrorTtl < 1 || mirrorTtl > 1440) {
+        focusField('set-mirrorTagTtlMinutes');
+        throw new Error('tag 缓存时长必须是 1–1440 的整数');
+      }
+      const mirrorEnabledInput = form.querySelector('[name="mirrorEnabled"]');
+      const mirrorAllowAllInput = form.querySelector('[name="mirrorAllowAll"]');
+      payload.mirror = {
+        enabled: !!(mirrorEnabledInput && mirrorEnabledInput.checked),
+        allowAll: !!(mirrorAllowAllInput && mirrorAllowAllInput.checked),
+        upstreams: mirrorUpstreams,
+        tagTtlMinutes: mirrorTtl
+      };
 
       const rows = form.querySelectorAll('[data-reg-row]');
       const seen = Object.create(null);
@@ -2093,6 +2295,9 @@
         break;
       case 'proxy-test':
         await runProxyTest(el);
+        break;
+      case 'mirror-stats-refresh':
+        await refreshMirrorStats(el);
         break;
       default:
         break;

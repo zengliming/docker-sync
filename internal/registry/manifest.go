@@ -63,6 +63,7 @@ type fetchedManifest struct {
 	doc       manifestDoc
 	mediaType string
 	digest    string
+	raw       []byte
 }
 
 func (m *fetchedManifest) isIndex() bool {
@@ -186,7 +187,7 @@ func (c *Client) fetchManifest(ctx context.Context, ref Ref, identifier string) 
 		}
 		mediaType = strings.TrimSpace(ct)
 	}
-	return &fetchedManifest{doc: doc, mediaType: mediaType, digest: digest}, nil
+	return &fetchedManifest{doc: doc, mediaType: mediaType, digest: digest, raw: body}, nil
 }
 
 // selectPlatform picks the image index entry for the requested platform.

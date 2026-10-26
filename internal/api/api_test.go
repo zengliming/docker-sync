@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,7 +19,10 @@ import (
 	"testing/fstest"
 	"time"
 
+	"docker-sync/internal/cas"
+	"docker-sync/internal/mirror"
 	"docker-sync/internal/model"
+	"docker-sync/internal/registry"
 	"docker-sync/internal/scheduler"
 	"docker-sync/internal/store"
 )
@@ -846,5 +851,212 @@ func TestUploadFileSMBEndpoint(t *testing.T) {
 	}
 	if env.sched.uploadCalls != calls {
 		t.Fatal("must not upload a missing file")
+	}
+}
+
+// fakeMirrorUpstream answers every manifest request with one canned index.
+type fakeMirrorUpstream struct {
+	body   []byte
+	digest string
+	calls  int
+}
+
+func (f *fakeMirrorUpstream) RawManifest(context.Context, registry.Ref, string) (registry.RawManifest, error) {
+	f.calls++
+	return registry.RawManifest{MediaType: registry.MediaTypeOCIIndex, Digest: f.digest, Body: f.body}, nil
+}
+
+func (f *fakeMirrorUpstream) OpenBlob(context.Context, registry.Ref, string) (io.ReadCloser, int64, error) {
+	return nil, 0, errors.New("unexpected blob request")
+}
+
+func (f *fakeMirrorUpstream) StatBlob(context.Context, registry.Ref, string) (int64, error) {
+	return 0, errors.New("unexpected stat request")
+}
+
+type fakeMirrorUpstreams struct{ up *fakeMirrorUpstream }
+
+func (f fakeMirrorUpstreams) Upstream(string) (mirror.Upstream, error) { return f.up, nil }
+
+// newMirrorEnv builds an API server with a blob cache and a fake upstream, and
+// turns the mirror on.
+func newMirrorEnv(t *testing.T, up *fakeMirrorUpstream) *testEnv {
+	t.Helper()
+	st, err := store.Open(store.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	blobs, err := cas.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("cas.New: %v", err)
+	}
+	fake := &fakeScheduler{started: true}
+	web := fstest.MapFS{"index.html": {Data: []byte("<!doctype html>")}}
+	srv, err := New(Options{
+		Store:           st,
+		Scheduler:       fake,
+		Blobs:           blobs,
+		WebUI:           web,
+		Version:         "test-version",
+		MirrorUpstreams: fakeMirrorUpstreams{up: up},
+	})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	if _, err := st.SetSettings(model.Settings{
+		Mirror: model.MirrorSettings{
+			Enabled:       true,
+			Upstreams:     []string{"docker.io"},
+			TagTTLMinutes: 60,
+		},
+		DefaultPlatform:        "linux/amd64",
+		MaxConcurrentRuns:      2,
+		MaxConcurrentDownloads: 4,
+		BlobCacheMaxGB:         20,
+		BlobCacheMaxAgeDays:    7,
+	}); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+	return &testEnv{handler: srv.Handler(), store: st, sched: fake, srv: srv}
+}
+
+func TestMirrorStatsEndpoint(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(t, http.MethodGet, "/api/mirror/stats", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	got := decodeBody[struct {
+		Enabled       bool     `json:"enabled"`
+		AllowAll      bool     `json:"allowAll"`
+		Upstreams     []string `json:"upstreams"`
+		TagTTLMinutes int      `json:"tagTtlMinutes"`
+		Stats         struct {
+			ManifestHits int64 `json:"manifestHits"`
+			BlobHits     int64 `json:"blobHits"`
+		} `json:"stats"`
+	}](t, rec)
+	if got.Enabled {
+		t.Fatal("mirror must be disabled by default")
+	}
+	if got.TagTTLMinutes != 60 || len(got.Upstreams) != 1 || got.Upstreams[0] != "docker.io" {
+		t.Fatalf("mirror defaults = %+v", got)
+	}
+	if got.Stats.ManifestHits != 0 || got.Stats.BlobHits != 0 {
+		t.Fatalf("stats = %+v", got.Stats)
+	}
+
+	// The JSON keys must match the documented contract exactly (the frontend
+	// reads them literally), so check the raw object as well.
+	raw := decodeBody[map[string]json.RawMessage](t, env.do(t, http.MethodGet, "/api/mirror/stats", ""))
+	for _, key := range []string{"enabled", "allowAll", "upstreams", "tagTtlMinutes", "stats"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("mirror stats response is missing %q: %v", key, raw)
+		}
+	}
+}
+
+func TestRegistryV2DisabledAnswersNotFound(t *testing.T) {
+	env := newTestEnv(t)
+	rec := env.do(t, http.MethodGet, "/v2/", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Docker-Distribution-Api-Version"); got != "registry/2.0" {
+		t.Fatalf("api version header = %q", got)
+	}
+	if !strings.Contains(rec.Body.String(), "errors") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestRegistryV2ServesManifests(t *testing.T) {
+	index := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}`)
+	sum := sha256.Sum256(index)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	up := &fakeMirrorUpstream{body: index, digest: digest}
+	env := newMirrorEnv(t, up)
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/3.20", nil)
+	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(index) {
+		t.Fatalf("body was altered on the way out")
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("registry responses must not be gzipped, got %q", got)
+	}
+	if got := rec.Header().Get("Docker-Content-Digest"); got != digest {
+		t.Fatalf("Docker-Content-Digest = %q", got)
+	}
+	if up.calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", up.calls)
+	}
+
+	// Second pull is served from the cache.
+	rec = httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/3.20", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != string(index) {
+		t.Fatalf("cached pull failed: %d", rec.Code)
+	}
+	if up.calls != 1 {
+		t.Fatalf("upstream was called again: %d", up.calls)
+	}
+
+	stats := decodeBody[struct {
+		Stats struct {
+			ManifestHits   int64 `json:"manifestHits"`
+			ManifestMisses int64 `json:"manifestMisses"`
+		} `json:"stats"`
+	}](t, env.do(t, http.MethodGet, "/api/mirror/stats", ""))
+	if stats.Stats.ManifestHits != 1 || stats.Stats.ManifestMisses != 1 {
+		t.Fatalf("mirror stats = %+v", stats.Stats)
+	}
+}
+
+func TestMirrorSettingsValidation(t *testing.T) {
+	env := newTestEnv(t)
+	base := `"defaultPlatform":"linux/amd64","maxConcurrentRuns":2,"maxConcurrentDownloads":4,"blobCacheMaxGB":20,"blobCacheMaxAgeDays":7`
+
+	ok := `{` + base + `,"mirror":{"enabled":true,"allowAll":false,"upstreams":[" Docker.io ","ghcr.io"],"tagTtlMinutes":30}}`
+	rec := env.do(t, http.MethodPut, "/api/settings", ok)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	saved := decodeBody[model.Settings](t, rec)
+	if !saved.Mirror.Enabled || saved.Mirror.TagTTLMinutes != 30 || len(saved.Mirror.Upstreams) != 2 {
+		t.Fatalf("saved mirror = %+v", saved.Mirror)
+	}
+	if saved.Mirror.Upstreams[0] != "docker.io" {
+		t.Fatalf("upstreams were not normalised: %v", saved.Mirror.Upstreams)
+	}
+
+	for _, bad := range []string{
+		`{` + base + `,"mirror":{"upstreams":["https://docker.io"],"tagTtlMinutes":60}}`,
+		`{` + base + `,"mirror":{"upstreams":["docker.io"],"tagTtlMinutes":5000}}`,
+		`{` + base + `,"mirror":{"upstreams":["docker.io","docker.io"],"tagTtlMinutes":60}}`,
+	} {
+		if rec := env.do(t, http.MethodPut, "/api/settings", bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad mirror settings status = %d for %s", rec.Code, bad)
+		}
+	}
+
+	// Clients that predate the mirror keep working: the omitted block falls back
+	// to the documented defaults instead of failing validation.
+	rec = env.do(t, http.MethodPut, "/api/settings", `{`+base+`}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy settings status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	legacy := decodeBody[model.Settings](t, rec)
+	if legacy.Mirror.Enabled || legacy.Mirror.TagTTLMinutes != 60 || len(legacy.Mirror.Upstreams) != 1 {
+		t.Fatalf("legacy defaults = %+v", legacy.Mirror)
 	}
 }

@@ -176,14 +176,31 @@ type SMBSettings struct {
 	Domain      string `json:"domain"`
 }
 
+// MirrorSettings turns the service into a read-only pull-through registry cache
+// that docker clients can pull from directly ("镜像加速站点").
+type MirrorSettings struct {
+	Enabled bool `json:"enabled"`
+	// AllowAll lets the mirror proxy any upstream registry. When false only the
+	// hosts listed in Upstreams are served.
+	AllowAll bool `json:"allowAll"`
+	// Upstreams lists the allowed upstream registry hosts. The first entry is the
+	// default: requests that do not start with a configured host are resolved
+	// against it (docker.io by default).
+	Upstreams []string `json:"upstreams"`
+	// TagTTLMinutes is how long a tag -> manifest digest mapping is reused before
+	// the upstream is asked whether the tag moved.
+	TagTTLMinutes int `json:"tagTtlMinutes"`
+}
+
 // Settings is the global service configuration.
 type Settings struct {
-	SMB                    SMBSettings `json:"smb"`
-	DefaultPlatform        string      `json:"defaultPlatform"`
-	MaxConcurrentRuns      int         `json:"maxConcurrentRuns"`
-	MaxConcurrentDownloads int         `json:"maxConcurrentDownloads"`
-	BlobCacheMaxGB         int         `json:"blobCacheMaxGB"`
-	BlobCacheMaxAgeDays    int         `json:"blobCacheMaxAgeDays"`
+	SMB                    SMBSettings    `json:"smb"`
+	Mirror                 MirrorSettings `json:"mirror"`
+	DefaultPlatform        string         `json:"defaultPlatform"`
+	MaxConcurrentRuns      int            `json:"maxConcurrentRuns"`
+	MaxConcurrentDownloads int            `json:"maxConcurrentDownloads"`
+	BlobCacheMaxGB         int            `json:"blobCacheMaxGB"`
+	BlobCacheMaxAgeDays    int            `json:"blobCacheMaxAgeDays"`
 	// ProxyURL is the outbound proxy for registry requests, e.g.
 	// "http://127.0.0.1:7890" or "socks5://127.0.0.1:7890". Empty means
 	// "use the HTTP_PROXY/HTTPS_PROXY environment variables".
