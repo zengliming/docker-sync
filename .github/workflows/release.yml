@@ -161,6 +161,8 @@ jobs:
       - name: 创建或更新 Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # 该 job 没有 checkout，gh 无法从 git remote 推断仓库，必须显式给出。
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.meta.outputs.tag }}
         run: |
           set -euo pipefail
