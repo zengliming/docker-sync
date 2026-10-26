@@ -419,15 +419,15 @@ docker pull 192.168.1.10:8080/ghcr.io/owner/app:v1     # 上游 ghcr.io 需在�
 | --- | --- |
 | `test` | `gofmt -l .` 无输出、`go vet ./...`、`go test ./...`，任一失败即中止发布 |
 | `meta` | 从 tag 解析版本号（`v0.1.0` → `0.1.0`） |
-| `build` | 矩阵编译 `linux/amd64`、`linux/arm64`、`windows/amd64`；`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<版本>"`，Linux 打 `.tar.gz`、Windows 打 `.zip`，并生成逐个文件的 sha256 |
+| `build` | 矩阵编译 `linux/amd64`、`linux/arm64`、`windows/amd64`；`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<版本> -X main.commit=<sha>"`，Linux 打 `.tar.gz`、Windows 打 `.zip`，并生成逐个文件的 sha256 |
 | `release` | 汇总所有产物 + `SHA256SUMS.txt`，用 `gh release create`（已存在则 `upload --clobber`）发布 |
 
-构建出的二进制版本号会显示在控制台右上角与 `GET /api/overview` 的 `version` 字段里：
+构建出的版本号会显示在控制台右上角与 `GET /api/overview` 的 `version` 字段里。版本串后面还会带上 git 提交号，例如 `0.1.2+1cdc758`——本地 `go build` 会自动从 `go build` 嵌入的 VCS 信息里读取，工作区有未提交改动时再加 `-dirty`，这样“页面是不是新代码”一眼可辨：
 
 ```bash
-$ ./docker-sync_0.1.0_linux_amd64 -addr :8080 &
+$ ./docker-sync_0.1.2_linux_amd64 -addr :8080 &
 $ curl -s localhost:8080/api/overview | grep -o '"version":"[^"]*"'
-"version":"0.1.0"
+"version":"0.1.2+1cdc758"
 ```
 
 注意：

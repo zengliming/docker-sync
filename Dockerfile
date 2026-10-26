@@ -25,8 +25,10 @@ ARG VERSION=0.1.0
 # ---------- 构建阶段 ----------
 FROM ${GO_IMAGE} AS build
 
-# 版本号会注入到 main.version（见 cmd/server/main.go）。
+# 版本号与提交号会注入到 main.version / main.commit（见 cmd/server/main.go）。
+# 镜像里没有 .git，所以 COMMIT 需要显式传入才能让页面显示 0.1.2+1cdc758 这样的标识。
 ARG VERSION
+ARG COMMIT=
 # GOPROXY 可换成 https://goproxy.cn,direct 等国内代理。
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV CGO_ENABLED=0 \
@@ -45,7 +47,7 @@ COPY . .
 # -trimpath 去掉本机路径；-s -w 去掉符号表和调试信息，减小体积。
 RUN go build \
         -trimpath \
-        -ldflags="-s -w -X main.version=${VERSION}" \
+        -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
         -o /out/docker-sync \
         ./cmd/server
 

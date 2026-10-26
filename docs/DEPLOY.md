@@ -66,6 +66,7 @@ apk 源、GOPROXY 都做成了 build-arg：
 | `GOPROXY` | `https://proxy.golang.org,direct` | Go module 代理，国内可换 `https://goproxy.cn,direct` |
 | `APK_MIRROR` | 空（官方源） | 运行阶段 apk 源前缀，如 `https://mirrors.aliyun.com/alpine` |
 | `VERSION` | `0.1.0` | 注入 `main.version` |
+| `COMMIT` | 空 | 注入 `main.commit`；镜像里没有 `.git`，想要页面显示 `0.1.2+1cdc758` 这样的标识就得显式传入 |
 
 ```bash
 docker build \
@@ -73,8 +74,13 @@ docker build \
   --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.22 \
   --build-arg APK_MIRROR=https://mirrors.aliyun.com/alpine \
   --build-arg GOPROXY=https://goproxy.cn,direct \
+  --build-arg VERSION=0.1.2 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
   -t docker-sync:local .
 ```
+
+构建完成后用 `curl -s localhost:8080/api/overview` 看 `version` 是否为期望的版本串（例如
+`0.1.2+1cdc758`）；如果还是旧值，说明容器跑的是旧镜像，`docker compose up -d --build --force-recreate`。
 
 compose 场景用同名环境变量覆盖（`docker-compose.yml` 已把它们接成 `${GO_IMAGE:-...}`）：
 `GO_IMAGE=... RUNTIME_IMAGE=... docker compose up -d --build`。

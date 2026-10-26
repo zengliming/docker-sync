@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -23,8 +24,44 @@ import (
 	"docker-sync/internal/store"
 )
 
-// version is overridable at build time with -ldflags "-X main.version=...".
-var version = "0.1.0"
+// version and commit are overridable at build time with
+// -ldflags "-X main.version=0.1.2 -X main.commit=<sha>". When commit is empty it
+// is taken from the VCS stamp that go build embeds automatically, so every
+// binary reports the exact source revision it was built from instead of a
+// version number that only changes when a release is cut.
+var (
+	version = "0.1.0"
+	commit  = ""
+)
+
+// buildVersion renders the version string shown by the API and the UI, e.g.
+// "0.1.0+ef8b472" or "0.1.2+1cdc758-dirty".
+func buildVersion() string {
+	c, dirty := commit, false
+	if c == "" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			for _, setting := range info.Settings {
+				switch setting.Key {
+				case "vcs.revision":
+					c = setting.Value
+				case "vcs.modified":
+					dirty = setting.Value == "true"
+				}
+			}
+		}
+	}
+	if len(c) > 7 {
+		c = c[:7]
+	}
+	out := version
+	if c != "" {
+		out += "+" + c
+		if dirty {
+			out += "-dirty"
+		}
+	}
+	return out
+}
 
 const (
 	defaultAddr     = ":8080"
@@ -64,9 +101,10 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("解析数据目录 %q 失败: %w", *dataDir, err)
 	}
-	fmt.Fprintf(os.Stdout, "docker-sync v%s\n  listen: %s\n  data:   %s\n", version, *addr, absData)
+	ver := buildVersion()
+	fmt.Fprintf(os.Stdout, "docker-sync v%s\n  listen: %s\n  data:   %s\n", ver, *addr, absData)
 	logger.Info("镜像同步服务启动",
-		"version", version,
+		"version", ver,
 		"addr", *addr,
 		"dataDir", absData,
 		"logLevel", level.String(),
@@ -98,7 +136,7 @@ func run(args []string) error {
 		Store:     st,
 		Scheduler: sched,
 		Blobs:     blobs,
-		Version:   version,
+		Version:   ver,
 		StartedAt: startedAt,
 		Logger:    logger,
 	})
