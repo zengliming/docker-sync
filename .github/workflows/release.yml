@@ -1,0 +1,189 @@
+name: release
+
+# 打 tag（v0.1.0 之类）时自动编译 Linux / Windows 可执行文件并创建 GitHub Release。
+# 也可以在 Actions 页面手动运行，填入版本号（不会自动创建 git tag）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布版本号，例如 v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CGO_ENABLED: "0"
+  BINARY: docker-sync
+
+jobs:
+  test:
+    name: 检查与测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt 检查
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  meta:
+    name: 解析版本号
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: 解析 tag 与版本
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          # 二进制里的版本号去掉前缀 v：v0.1.0 -> 0.1.0
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "发布标签：${tag}；二进制版本：${version}"
+
+  build:
+    name: 编译 ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [test, meta]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          # 目前 Windows 只发布 amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 编译并打包
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="${BINARY}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p dist
+          bin="${name}"
+          if [ "${GOOS}" = "windows" ]; then
+            bin="${bin}.exe"
+          fi
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${bin}" ./cmd/server
+          chmod +x "dist/${bin}" 2>/dev/null || true
+          file "dist/${bin}"
+
+          # 压缩包：Linux 用 tar.gz，Windows 用 zip（python3 zipfile，不依赖 zip 命令）
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && python3 -m zipfile -c "${name}.zip" "${bin}")
+          else
+            (cd dist && tar -czf "${name}.tar.gz" "${bin}")
+          fi
+
+          # 校验和（每个产物一份，发布时汇总）
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && sha256sum "${bin}" "${name}.zip" > "${name}.sha256")
+          else
+            (cd dist && sha256sum "${bin}" "${name}.tar.gz" > "${name}.sha256")
+          fi
+          ls -l dist
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: 创建 Release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 汇总校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS.txt
+          rm -f ./*.sha256
+          ls -l
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --generate-notes \
+              dist/*
+          fi
+
+      - name: 输出产物清单
+        run: |
+          set -euo pipefail
+          echo "### ${TAG} 发布完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 文件 | 大小 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          cd dist
+          for f in *; do
+            size="$(du -h "$f" | cut -f1)"
+            echo "| $f | $size |" >> "$GITHUB_STEP_SUMMARY"
+          done
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}

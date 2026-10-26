@@ -174,6 +174,29 @@ go build -trimpath -o bin/docker-sync ./cmd/server
 
 浏览器访问 `http://localhost:8080` 即可。
 
+### 方式三：直接下载编译好的可执行文件
+
+推送 `v*` 标签时 GitHub Actions 会自动交叉编译并发布到 Releases 页（见下方[发布](#发布github-actions)），
+不需要本机安装 Go：
+
+| 平台 | 产物 |
+| --- | --- |
+| Linux x86_64 | `docker-sync_<版本>_linux_amd64`（附 `.tar.gz`） |
+| Linux arm64 | `docker-sync_<版本>_linux_arm64`（附 `.tar.gz`） |
+| Windows x86_64 | `docker-sync_<版本>_windows_amd64.exe`（附 `.zip`） |
+| 校验和 | `SHA256SUMS.txt` |
+
+```bash
+chmod +x docker-sync_0.1.0_linux_amd64
+./docker-sync_0.1.0_linux_amd64 -addr :8080 -data ./data
+```
+
+```powershell
+.\docker-sync_0.1.0_windows_amd64.exe -addr :8080 -data .\data
+```
+
+Windows 上数据目录里含 tar、blob 缓存与 `state.json`，建议放在磁盘空间充足的位置（默认 `.\data`）。
+
 ## 配置项
 
 优先级：命令行 flag > 环境变量 > 默认值。三个配置项都同时支持 flag 与 env。
@@ -337,6 +360,39 @@ data/
 - HTTP API 契约（前后端字段、错误码、SSE）见 **[docs/API.md](docs/API.md)**。
 - 服务**没有内置鉴权**。请只监听内网/回环地址，或放在带认证的反向代理（Nginx/Caddy/Traefik）之后；
   公网暴露等于把镜像拉取能力和数据目录管理权限开放给所有人。
+
+## 发布（GitHub Actions）
+
+工作流文件：`.github/workflows/release.yml`。
+
+触发方式：
+
+1. **推 tag**（推荐）：`git tag v0.1.0 && git push origin v0.1.0` → 编译 + 创建同名 Release。
+2. **手动运行**：Actions 页面选 `release` → `Run workflow`，填入版本号（如 `v0.1.0`）；
+   不会新建 git tag，但会在默认分支 HEAD 上创建/更新 Release。
+
+流水线分四步：
+
+| Job | 内容 |
+| --- | --- |
+| `test` | `gofmt -l .` 无输出、`go vet ./...`、`go test ./...`，任一失败即中止发布 |
+| `meta` | 从 tag 解析版本号（`v0.1.0` → `0.1.0`） |
+| `build` | 矩阵编译 `linux/amd64`、`linux/arm64`、`windows/amd64`；`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<版本>"`，Linux 打 `.tar.gz`、Windows 打 `.zip`，并生成逐个文件的 sha256 |
+| `release` | 汇总所有产物 + `SHA256SUMS.txt`，用 `gh release create`（已存在则 `upload --clobber`）发布 |
+
+构建出的二进制版本号会显示在控制台右上角与 `GET /api/overview` 的 `version` 字段里：
+
+```bash
+$ ./docker-sync_0.1.0_linux_amd64 -addr :8080 &
+$ curl -s localhost:8080/api/overview | grep -o '"version":"[^"]*"'
+"version":"0.1.0"
+```
+
+注意：
+
+- Release 里只有**裸可执行文件**，不含 Docker 镜像；容器镜像仍按 [docs/DEPLOY.md](docs/DEPLOY.md) 自行 `docker build`。
+- 需要给仓库开启 Actions 写权限（工作流已声明 `permissions: contents: write`，用于创建 Release）。
+- 想加 Windows arm64 或 `linux/386`，在 `release.yml` 的 `matrix` 里加一行（或删掉 `exclude`）即可。
 
 ## 开发与验证
 
