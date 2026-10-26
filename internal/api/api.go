@@ -103,7 +103,7 @@ func New(opts Options) (*Server, error) {
 		s.startedAt = time.Now()
 	}
 	if index, err := fs.ReadFile(web, "index.html"); err == nil {
-		s.index = index
+		s.index = withAssetVersions(index, web)
 	} else {
 		s.log.Warn("未找到前端 index.html", "error", err)
 	}

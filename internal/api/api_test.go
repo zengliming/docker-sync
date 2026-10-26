@@ -141,7 +141,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	})
 	fake := &fakeScheduler{started: true}
 	web := fstest.MapFS{
-		"index.html":     {Data: []byte("<!doctype html><title>index</title>")},
+		"index.html": {Data: []byte(`<!doctype html><title>index</title>` +
+			`<link rel="stylesheet" href="/static/app.css">` +
+			`<script defer src="/static/app.js"></script>`)},
 		"static/app.js":  {Data: []byte("console.log('app');")},
 		"static/app.css": {Data: []byte("body{margin:0}")},
 	}
@@ -674,6 +676,23 @@ func TestStaticAndNotFound(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("cache control = %q", got)
+	}
+
+	// The entry point must reference versioned asset URLs so an upgraded binary
+	// is never masked by a cached app.js.
+	page := rec.Body.String()
+	sum := sha256.Sum256([]byte("console.log('app');"))
+	versioned := "/static/app.js?v=" + hex.EncodeToString(sum[:5])
+	if !strings.Contains(page, versioned) {
+		t.Fatalf("index.html does not reference %q: %s", versioned, page)
+	}
+
+	rec = env.do(t, http.MethodGet, versioned, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "console.log") {
+		t.Fatalf("versioned static = %d %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Fatalf("versioned static cache control = %q", got)
 	}
 
 	rec = env.do(t, http.MethodGet, "/static/app.js", "")
