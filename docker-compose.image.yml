@@ -6,6 +6,8 @@
 #
 #   # 2) 启动（不构建，只用本地已有镜像）
 #   mkdir -p data
+#   # 若镜像包含入口脚本（本仓库 Dockerfile 构建的 0.1.5+），可跳过下面这行；
+#   # 旧镜像没有自动修权限逻辑，必须手工指定属主，否则下载 tar 会失败。
 #   sudo chown -R 10001:10001 data   # Windows Docker Desktop 一般无需处理
 #   docker compose -f docker-compose.image.yml up -d
 #
@@ -20,7 +22,7 @@ name: docker-sync
 services:
   docker-sync:
     # 用 docker load 导入的镜像；没有 build 段，compose 不会尝试构建。
-    image: "${DOCKER_SYNC_IMAGE:-docker-sync:0.1.4}"
+    image: "${DOCKER_SYNC_IMAGE:-docker-sync:0.1.6}"
     # never：只用本地镜像，不会去仓库拉取（离线环境必需）。
     pull_policy: never
     container_name: docker-sync

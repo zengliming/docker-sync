@@ -82,8 +82,9 @@ VOLUME ["/data"]
 # 因此只需暴露 8080。
 EXPOSE 8080
 
-USER docker-sync
-
+# 刻意不写 USER：容器以 root 启动，程序自己在打开状态文件前把 /data 的属主
+# 交给 UID 10001 并 setuid 降权。这样绑定挂载目录无论由谁创建都能写入，
+# 也不需要镜像内提供 su-exec/gosu。
 STOPSIGNAL SIGTERM
 
 # 默认 TLS_MODE=auto 监听 HTTPS，传 TLS_MODE=off 则是明文 HTTP，所以两种都试一次。

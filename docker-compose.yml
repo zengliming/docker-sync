@@ -2,10 +2,14 @@
 #
 # 用法：
 #   mkdir -p data
-#   # Linux/macOS 首次运行时，让容器内的非 root 用户（UID 10001）可写绑定目录：
-#   sudo chown -R 10001:10001 data
 #   docker compose up -d --build
 #   # 打开 http://localhost:8080
+#
+# 数据目录权限：服务以 root 启动，在打开状态文件之前把 /data 的属主交给
+# UID 10001 并 setuid 降权，因此绑定目录由谁创建都能写入，一般无需手工 chown。
+# 以下场景仍需手工执行 `sudo chown -R 10001:10001 data`：
+#   - 宿主机启用了 userns-remap
+#   - /data 来自 NFS / SMB 挂载，容器内无权 chown
 #
 # 注意：这是纯本地/内网工具，服务本身没有鉴权，不要直接暴露到公网。
 

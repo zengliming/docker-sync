@@ -55,6 +55,7 @@ func main() {
 	platform := flag.String("platform", "linux/amd64", "target platform")
 	binary := flag.String("binary", "bin/docker-sync-linux-amd64", "statically linked linux binary")
 	certs := flag.String("certs", "", "PEM CA bundle, only used when the base image ships none")
+	entrypoint := flag.String("entrypoint", "", "optional entrypoint script copied to /entrypoint.sh; leave empty to exec /app/docker-sync directly")
 	tag := flag.String("tag", "docker-sync:0.1.4", "primary repo tag")
 	extraTag := flag.String("extra-tag", "docker-sync:latest", "additional repo tag (empty to skip)")
 	version := flag.String("version", "0.1.4", "image version label")
@@ -62,13 +63,13 @@ func main() {
 	out := flag.String("out", "dist/docker-sync-image-linux-amd64.tar", "output archive")
 	flag.Parse()
 
-	if err := run(*base, *platform, *binary, *certs, *tag, *extraTag, *version, *commit, *out); err != nil {
+	if err := run(*base, *platform, *binary, *certs, *entrypoint, *tag, *extraTag, *version, *commit, *out); err != nil {
 		fmt.Fprintln(os.Stderr, "imagebuild:", err)
 		os.Exit(1)
 	}
 }
 
-func run(base, platform, binaryPath, certsPath, tag, extraTag, version, commit, outPath string) error {
+func run(base, platform, binaryPath, certsPath, entrypointPath, tag, extraTag, version, commit, outPath string) error {
 	ctx := context.Background()
 
 	work, err := os.MkdirTemp("", "imagebuild-")
@@ -113,7 +114,7 @@ func run(base, platform, binaryPath, certsPath, tag, extraTag, version, commit, 
 		fmt.Printf("warning: base image has no CA bundle and -certs is empty; HTTPS upstreams may fail\n")
 	}
 
-	appLayer, appDiffID, err := buildAppLayer(binaryPath, certsPath, baseFiles)
+	appLayer, appDiffID, hasEntrypoint, err := buildAppLayer(binaryPath, certsPath, entrypointPath, baseFiles)
 	if err != nil {
 		return err
 	}
@@ -123,7 +124,14 @@ func run(base, platform, binaryPath, certsPath, tag, extraTag, version, commit, 
 	}
 	fmt.Printf("app layer %s (%d bytes gzip, diff %s)\n", appDigest, appSize, appDiffID)
 
-	configJSON, err := buildConfig(baseConfig, appDiffID, version, commit)
+	entryCmd := []string{"/app/docker-sync"}
+	if hasEntrypoint {
+		entryCmd = []string{"/entrypoint.sh"}
+		fmt.Printf("entrypoint /entrypoint.sh\n")
+	}
+	// 不设置 User：程序以 root 启动，自己 chown 数据目录后 setuid 降权，
+	// 不依赖镜像里是否存在 su-exec/gosu 之类的工具。
+	configJSON, err := buildConfig(baseConfig, appDiffID, version, commit, entryCmd, "")
 	if err != nil {
 		return err
 	}
@@ -266,10 +274,10 @@ func scanTarFor(r io.Reader, wanted map[string]bool) (map[string][]byte, error) 
 // baseFiles holds files inherited from the base image (passwd, group, CA
 // bundle). They are extended or left alone instead of being overwritten, so the
 // image keeps the distro's own users and trust store.
-func buildAppLayer(binaryPath, certsPath string, baseFiles map[string][]byte) ([]byte, string, error) {
+func buildAppLayer(binaryPath, certsPath, entrypointPath string, baseFiles map[string][]byte) ([]byte, string, bool, error) {
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 
 	created := time.Unix(1700000000, 0).UTC()
@@ -281,12 +289,23 @@ func buildAppLayer(binaryPath, certsPath string, baseFiles map[string][]byte) ([
 		{name: "etc/group", mode: 0o644, content: appendGroup(baseFiles["etc/group"])},
 	}
 
+	// 入口脚本归属 root，因为它需要在启动时 chown 挂载目录，之后自行降权。
+	hasEntrypoint := false
+	if entrypointPath != "" {
+		script, err := os.ReadFile(entrypointPath)
+		if err != nil {
+			return nil, "", false, fmt.Errorf("read entrypoint: %w", err)
+		}
+		files = append(files, layerFile{name: "entrypoint.sh", mode: 0o755, uid: 0, gid: 0, content: script})
+		hasEntrypoint = true
+	}
+
 	// Only ship a CA bundle when the base image has none: distro images already
 	// carry a maintained one and overwriting it would drop their updates.
 	if len(baseFiles[caBundlePath]) == 0 && certsPath != "" {
 		certs, err := os.ReadFile(certsPath)
 		if err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 		files = append(files,
 			layerFile{name: "etc/ssl", mode: 0o755, dir: true},
@@ -314,16 +333,16 @@ func buildAppLayer(binaryPath, certsPath string, baseFiles map[string][]byte) ([
 			hdr.Size = int64(len(f.content))
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 		if !f.dir {
 			if _, err := tw.Write(f.content); err != nil {
-				return nil, "", err
+				return nil, "", false, err
 			}
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 
 	sum := sha256.Sum256(plain.Bytes())
@@ -332,16 +351,16 @@ func buildAppLayer(binaryPath, certsPath string, baseFiles map[string][]byte) ([
 	var gz bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&gz, gzip.BestCompression)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	zw.Header.ModTime = created
 	if _, err := zw.Write(plain.Bytes()); err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	if err := zw.Close(); err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
-	return gz.Bytes(), diffID, nil
+	return gz.Bytes(), diffID, hasEntrypoint, nil
 }
 
 // storeLayer writes the compressed layer into the CAS and returns its digest.
@@ -357,7 +376,7 @@ func storeLayer(ctx context.Context, blobs *cas.Store, layer []byte) (string, in
 
 // buildConfig renders the image config: base diff ids plus the app layer, and a
 // history entry so the layer count matches.
-func buildConfig(base baseConfig, appDiffID, version, commit string) ([]byte, error) {
+func buildConfig(base baseConfig, appDiffID, version, commit string, entryCmd []string, runUser string) ([]byte, error) {
 	created := time.Now().UTC().Format(time.RFC3339)
 	diffIDs := append(append([]string{}, base.RootFS.DiffIDs...), appDiffID)
 	history := append([]json.RawMessage{}, base.History...)
@@ -375,41 +394,46 @@ func buildConfig(base baseConfig, appDiffID, version, commit string) ([]byte, er
 	}
 	history = append(history, entry)
 
+	runtime := map[string]any{
+		"Env": []string{
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		},
+		"Entrypoint":   entryCmd,
+		"Cmd":          []string{"-addr", ":8080", "-data", "/data"},
+		"WorkingDir":   "/app",
+		"ExposedPorts": map[string]any{"8080/tcp": map[string]any{}},
+		"Volumes":      map[string]any{"/data": map[string]any{}},
+		"StopSignal":   "SIGTERM",
+		"Labels":       imageLabels(version, commit),
+		"Healthcheck": map[string]any{
+			"Test": []string{
+				"CMD-SHELL",
+				"wget -q -O /dev/null http://127.0.0.1:8080/api/health || wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8080/api/health || exit 1",
+			},
+			"Interval":    int64(30 * time.Second),
+			"Timeout":     int64(5 * time.Second),
+			"StartPeriod": int64(10 * time.Second),
+			"Retries":     3,
+		},
+		"AttachStdin":  false,
+		"AttachStdout": false,
+		"AttachStderr": false,
+		"Tty":          false,
+		"OpenStdin":    false,
+		"StdinOnce":    false,
+	}
+	// runUser 为空表示以 root 启动，由入口脚本修正挂载目录后自行降权。
+	if runUser != "" {
+		runtime["User"] = runUser
+	}
+
 	cfg := map[string]any{
 		"architecture": "amd64",
 		"os":           "linux",
 		"created":      created,
-		"config": map[string]any{
-			"Env": []string{
-				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-			},
-			"Entrypoint":   []string{"/app/docker-sync"},
-			"Cmd":          []string{"-addr", ":8080", "-data", "/data"},
-			"WorkingDir":   "/app",
-			"User":         fmt.Sprintf("%d:%d", appUser, appGroup),
-			"ExposedPorts": map[string]any{"8080/tcp": map[string]any{}},
-			"Volumes":      map[string]any{"/data": map[string]any{}},
-			"StopSignal":   "SIGTERM",
-			"Labels":       imageLabels(version, commit),
-			"Healthcheck": map[string]any{
-				"Test": []string{
-					"CMD-SHELL",
-					"wget -q -O /dev/null http://127.0.0.1:8080/api/health || wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8080/api/health || exit 1",
-				},
-				"Interval":    int64(30 * time.Second),
-				"Timeout":     int64(5 * time.Second),
-				"StartPeriod": int64(10 * time.Second),
-				"Retries":     3,
-			},
-			"AttachStdin":  false,
-			"AttachStdout": false,
-			"AttachStderr": false,
-			"Tty":          false,
-			"OpenStdin":    false,
-			"StdinOnce":    false,
-		},
-		"rootfs":  map[string]any{"type": "layers", "diff_ids": diffIDs},
-		"history": history,
+		"config":       runtime,
+		"rootfs":       map[string]any{"type": "layers", "diff_ids": diffIDs},
+		"history":      history,
 	}
 	return json.Marshal(cfg)
 }

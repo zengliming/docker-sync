@@ -110,6 +110,11 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("解析数据目录 %q 失败: %w", *dataDir, err)
 	}
+	// 容器通常以 root 启动：先修正数据目录属主再降权，之后所有文件操作都以
+	// 服务用户身份进行。放在这里是为了赶在打开任何状态文件之前完成切换。
+	if err := dropPrivileges(absData); err != nil {
+		return err
+	}
 	certDir := strings.TrimSpace(*tlsDir)
 	if certDir == "" {
 		certDir = filepath.Join(absData, "tls")
