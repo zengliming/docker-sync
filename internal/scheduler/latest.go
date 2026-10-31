@@ -122,3 +122,14 @@ func resolvedTagFor(task model.Task, ref registry.Ref) string {
 	}
 	return ref.Tag
 }
+
+// repoTagFor picks the repository tag recorded inside the tar. A latest-following
+// task is tagged with the concrete version it synced (alpine:3.24.3), so
+// "docker load" never produces a moving latest tag; everything else keeps the
+// configured reference.
+func repoTagFor(task model.Task, ref registry.Ref) string {
+	if ref.Tag == "" || ref.Digest != "" {
+		return task.Image
+	}
+	return ref.String()
+}

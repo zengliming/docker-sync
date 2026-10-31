@@ -301,7 +301,7 @@ func (s *Scheduler) executeSync(j *job) {
 	path := filepath.Join(s.store.TarsDir(), name)
 	s.logRun(j.runID, model.LevelInfo, "开始打包 %s", name)
 	size, err := save.Build(ctx, path, img, s.blobs, save.Options{
-		RepoTags: []string{task.Image},
+		RepoTags: []string{repoTagFor(task, ref)},
 		Platform: img.Platform,
 		Created:  time.Now(),
 	})

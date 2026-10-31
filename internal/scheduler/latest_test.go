@@ -8,8 +8,52 @@ import (
 	"time"
 
 	"docker-sync/internal/model"
+	"docker-sync/internal/registry"
 	"docker-sync/internal/store"
 )
+
+// TestRepoTagForTagsTarsWithConcreteVersion guards the tag written into the tar:
+// a latest-following task must load as the concrete version, never as latest.
+func TestRepoTagForTagsTarsWithConcreteVersion(t *testing.T) {
+	digestRef, err := registry.Parse("busybox@sha256:" + strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cases := []struct {
+		name  string
+		task  model.Task
+		image string
+		want  string
+	}{
+		{
+			name:  "followed latest is tagged with the concrete version",
+			task:  model.Task{Image: "docker.io/library/alpine:latest", IgnoreLatest: true},
+			image: "docker.io/library/alpine:3.24.3",
+			want:  "docker.io/library/alpine:3.24.3",
+		},
+		{
+			name:  "pinned tag keeps its own reference",
+			task:  model.Task{Image: "docker.io/library/alpine:3.20"},
+			image: "docker.io/library/alpine:3.20",
+			want:  "docker.io/library/alpine:3.20",
+		},
+		{
+			name:  "digest reference is left untouched",
+			task:  model.Task{Image: digestRef.String()},
+			image: digestRef.String(),
+			want:  digestRef.String(),
+		},
+	}
+	for _, tc := range cases {
+		ref, err := registry.Parse(tc.image)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", tc.name, err)
+		}
+		if got := repoTagFor(tc.task, ref); got != tc.want {
+			t.Errorf("%s: repoTagFor() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestIgnoredLatestTagMatches(t *testing.T) {
 	const digestRef = "alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111"

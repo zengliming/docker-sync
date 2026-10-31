@@ -88,7 +88,7 @@
 | `intervalMinutes` | interval 模式下间隔分钟数，最小 1 |
 | `cron` | cron 模式下的 5 段标准 cron（分 时 日 月 周），服务器本地时区 |
 | `autoSync` | 定时检查发现新 digest 时是否自动 pull 并生成 tar；false 时只记录 `updateAvailable` |
-| `ignoreLatest` | true 时，镜像 tag 为 `latest`（含不写 tag 的写法）的任务不直接拉取 latest：每次定时检查/同步与手动 `sync`/`check` 都先向上游 `tags/list` 查出最新的具体版本（纯数字版本号，最大者），再对该版本解析与拉取。tag 已经是具体版本时按原 tag 处理 |
+| `ignoreLatest` | true 时，镜像 tag 为 `latest`（含不写 tag 的写法）的任务不直接拉取 latest：每次定时检查/同步与手动 `sync`/`check` 都先向上游 `tags/list` 查出最新的具体版本（纯数字版本号，多段版本优先、取最大者），再对该版本解析、拉取并打包，tar 的 `RepoTags` 也是该具体版本。tag 已经是具体版本时按原 tag 处理 |
 | `resolvedTag` | 勾选 `ignoreLatest` 且镜像用 `latest` 时，上一次自动跟随到的具体版本（如 `3.20.1`）；其它情况为空 |
 | `keepVersions` | 该任务保留的 tar 份数（1–50），旧文件自动清理 |
 | `status` | `idle` / `queued` / `running` / `error` / `paused` |

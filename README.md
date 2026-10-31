@@ -329,6 +329,8 @@ data/
   再对该具体版本解析和拉取；
 - 也就是说勾选后**同步的永远是具体版本**，tar 名里能看到版本号（如
   `library_alpine_3.20.1_linux_amd64_<digest>.tar`），任务行会显示「跟随 3.20.1」标记；
+- 生成的 tar 内部 `RepoTags` 同样是具体版本（`docker.io/library/alpine:3.24.3`），
+  所以 `docker load` 之后拿到的是 `alpine:3.24.3` 这类镜像，不会出现 `latest` 标签；
 - 上游发布新版本后，下一次检查就会跟到新版本并标记「有新版本」，自动同步会按 `autoSync` 的设置执行——
   旧的 `latest` tar 不会因为 move tag 而反复重下同一个内容；
 - 定时与手动行为完全一致，没有「只能等定时任务」的限制；
