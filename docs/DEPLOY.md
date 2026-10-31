@@ -198,6 +198,31 @@ Docker 会自动把卷的属主设置为镜像中 `/data` 的属主（UID 10001�
 代价是数据不在宿主机目录里，备份要用 `docker run --rm -v docker-sync-data:/data ... tar` 或
 `docker cp`。
 
+### 3.4 直接运行预构建镜像（不 build）
+
+拿到 `docker-sync-image-linux-amd64.tar`（Release 资产，或用 §2.2 的 `tools/imagebuild` 生成）
+后用 `docker-compose.image.yml` 启动。该文件没有 `build` 段，并写了 `pull_policy: never`，
+离线环境也不会尝试联网拉取：
+
+```bash
+docker load -i docker-sync-image-linux-amd64.tar
+mkdir -p data && sudo chown -R 10001:10001 data
+docker compose -f docker-compose.image.yml up -d
+docker compose -f docker-compose.image.yml logs -f    # 看启动横幅与监听协议
+```
+
+关键选项（都在 `docker-compose.image.yml` 里，可用同名环境变量覆盖）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DOCKER_SYNC_IMAGE` | `docker-sync:0.1.4` | 要运行的镜像 tag，升级时改这里 |
+| `TLS_MODE` | `auto` | `auto`/`self-signed`/`files`/`off`，`off` 才跑明文 HTTP |
+| `TZ` | `Asia/Shanghai` | cron 表达式按此本地时区解释 |
+| `TLS_HOSTS` | 空 | 追加进自签证书的域名，逗号分隔 |
+
+升级流程：`docker load -i` 新 tar → `DOCKER_SYNC_IMAGE=docker-sync:0.2.0 docker compose -f docker-compose.image.yml up -d`
+（数据卷 `./data` 不变，任务与已生成的 tar 都会保留）。
+
 ## 4. 文件权限（UID 10001）
 
 运行镜像里没有 root：容器进程以 `docker-sync`（UID 10001，无登录 shell）启动。

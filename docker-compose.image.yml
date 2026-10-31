@@ -1,0 +1,43 @@
+# docker-sync 直接运行预构建镜像（不需要 --build，也不需要 Go / Docker Hub）
+#
+# 用法：
+#   # 1) 先导入镜像归档（只需一次）
+#   docker load -i docker-sync-image-linux-amd64.tar
+#
+#   # 2) 启动（不构建，只用本地已有镜像）
+#   mkdir -p data
+#   sudo chown -R 10001:10001 data   # Windows Docker Desktop 一般无需处理
+#   docker compose -f docker-compose.image.yml up -d
+#
+#   # 3) 打开 https://localhost:8080 （默认自动生成自签证书；
+#   #    想跑明文 HTTP 就 TLS_MODE=off docker compose -f docker-compose.image.yml up -d）
+#
+# 换版本：DOCKER_SYNC_IMAGE=docker-sync:0.2.0 docker compose -f docker-compose.image.yml up -d
+# 注意：这是纯本地/内网工具，服务本身没有鉴权，不要直接暴露到公网。
+
+name: docker-sync
+
+services:
+  docker-sync:
+    # 用 docker load 导入的镜像；没有 build 段，compose 不会尝试构建。
+    image: "${DOCKER_SYNC_IMAGE:-docker-sync:0.1.4}"
+    # never：只用本地镜像，不会去仓库拉取（离线环境必需）。
+    pull_policy: never
+    container_name: docker-sync
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # 让 SIGTERM 有足够时间完成优雅关闭（服务内部最多等待 30s）。
+    stop_grace_period: 40s
+    environment:
+      # 默认 auto：给了 TLS_CERT/TLS_KEY 就用外部证书，没给就自动生成自签证书并监听 HTTPS。
+      # 想跑明文 HTTP（客户端要配 insecure-registries）必须显式设 TLS_MODE=off。
+      TLS_MODE: "${TLS_MODE:-auto}"        # auto | self-signed | files | off
+      # TLS_CERT: "/data/tls/company.pem"
+      # TLS_KEY: "/data/tls/company.key"
+      # TLS_HOSTS: "mirror.corp.local"     # 追加进自签证书的域名，逗号分隔
+      # TLS_DIR: "/data/tls"
+      TZ: "Asia/Shanghai"        # cron 表达式按此本地时区解释
+    # healthcheck 已由镜像内置（GET /api/health，HTTP/HTTPS 都会自动探测）。

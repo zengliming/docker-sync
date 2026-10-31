@@ -220,6 +220,18 @@ docker run -d --name docker-sync \
 `/data` 是数据卷，`-addr :8080 -data /data` 已是默认 CMD。挂载的宿主机目录需要
 UID 10001 可写（`sudo chown -R 10001:10001 /srv/docker-sync`）。
 
+想用 compose 管理（重启策略、`TZ`、`TLS_MODE` 等），仓库里另有一个**不含 build 段**的
+文件，导入镜像后直接起，不会触发构建也不会去仓库拉取：
+
+```bash
+docker load -i docker-sync-image-linux-amd64.tar
+mkdir -p data && sudo chown -R 10001:10001 data
+docker compose -f docker-compose.image.yml up -d
+# 换版本：DOCKER_SYNC_IMAGE=docker-sync:0.2.0 docker compose -f docker-compose.image.yml up -d
+```
+
+（`docker-compose.image.yml` 里写了 `pull_policy: never`，离线环境不会因为找不到远端镜像而失败。）
+
 这个归档不带任何构建缓存，也不需要本机装 Docker 才能生成——本仓库自带一个
 维护者工具，用 Registry v2 API 拉基础镜像后自己拼出 `docker save` 格式的 tar：
 
