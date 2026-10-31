@@ -25,11 +25,12 @@ type CheckResult struct {
 	Platform        string
 }
 
-// latestTagIgnored reports whether an automatic run must be skipped because the
-// task watches the moving "latest" tag and opted out of automatic runs.
-// Manual triggers (model.TriggerManual / model.TriggerCheck) always go through.
-func latestTagIgnored(task model.Task, trigger string) bool {
-	if trigger != model.TriggerSchedule || !task.IgnoreLatest {
+// ignoredLatestTag reports whether the task watches the moving "latest" tag and
+// opted out of everything except an explicit version: with IgnoreLatest set,
+// such a task is skipped by the scheduler and also refuses manual syncs until
+// the image is pinned to a concrete tag or digest.
+func ignoredLatestTag(task model.Task) bool {
+	if !task.IgnoreLatest {
 		return false
 	}
 	ref, err := registry.Parse(task.Image)
@@ -40,6 +41,19 @@ func latestTagIgnored(task model.Task, trigger string) bool {
 		return false
 	}
 	return ref.Tag == "latest"
+}
+
+// latestTagIgnored reports whether an automatic run must be skipped because the
+// task watches the moving "latest" tag and opted out of automatic checks.
+func latestTagIgnored(task model.Task, trigger string) bool {
+	return trigger == model.TriggerSchedule && ignoredLatestTag(task)
+}
+
+// refusedLatestError explains why a manual run of a latest-tagged task is
+// rejected: the user asked for latest to be ignored entirely.
+func refusedLatestError(task model.Task) error {
+	return fmt.Errorf("%w: 镜像 %s 使用 latest 标签，已勾选「忽略 latest」；请把镜像改成具体版本（如 nginx:1.27）或取消勾选后再同步",
+		ErrLatestIgnored, task.Image)
 }
 
 // TriggerSync queues a full synchronisation of the task. trigger is
@@ -56,6 +70,9 @@ func (s *Scheduler) TriggerSync(taskID, trigger string, force bool) (model.Run, 
 	if latestTagIgnored(task, trigger) {
 		s.reschedule(taskID)
 		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
+	}
+	if ignoredLatestTag(task) {
+		return model.Run{}, refusedLatestError(task)
 	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
@@ -96,6 +113,9 @@ func (s *Scheduler) StartCheck(taskID, trigger string) (model.Run, error) {
 		s.reschedule(taskID)
 		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
 	}
+	if ignoredLatestTag(task) {
+		return model.Run{}, refusedLatestError(task)
+	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
 	}
@@ -134,6 +154,9 @@ func (s *Scheduler) CheckNow(ctx context.Context, taskID string) (CheckResult, e
 	ref, err := registry.Parse(task.Image)
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("%w: 解析镜像引用 %q 失败: %v", ErrInvalidInput, task.Image, err)
+	}
+	if ignoredLatestTag(task) {
+		return CheckResult{}, refusedLatestError(task)
 	}
 	platform, err := s.platformFor(task)
 	if err != nil {

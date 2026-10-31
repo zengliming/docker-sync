@@ -12,6 +12,10 @@ import (
 	"docker-sync/internal/scheduler"
 )
 
+// latestIgnoredMessage explains the 409 returned for a latest-tagged task that
+// opted out of the moving tag.
+const latestIgnoredMessage = "任务已勾选「忽略 latest」：latest 标签不参与同步与检查，请把镜像改成具体版本（如 nginx:1.27）或取消勾选后再操作"
+
 // applyTaskInput validates the create/update payload and returns the task to
 // persist. Run related fields are inherited from base (zero for create).
 func (s *Server) applyTaskInput(base model.Task, in model.TaskInput) (model.Task, error) {
@@ -194,6 +198,8 @@ func (s *Server) handleCheckTask(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, scheduler.ErrNotFound):
 			writeError(w, http.StatusNotFound, "任务不存在: %s", id)
+		case errors.Is(err, scheduler.ErrLatestIgnored):
+			writeError(w, http.StatusConflict, "%s", latestIgnoredMessage)
 		case errors.Is(err, scheduler.ErrInvalidInput):
 			writeError(w, http.StatusBadRequest, "检查更新失败: %v", err)
 		default:
@@ -231,6 +237,8 @@ func (s *Server) writeSchedulerError(w http.ResponseWriter, err error, context s
 		writeError(w, http.StatusNotFound, "任务不存在")
 	case errors.Is(err, scheduler.ErrBusy):
 		writeError(w, http.StatusConflict, "任务已有正在进行的运行，请稍后再试")
+	case errors.Is(err, scheduler.ErrLatestIgnored):
+		writeError(w, http.StatusConflict, "%s", latestIgnoredMessage)
 	case errors.Is(err, scheduler.ErrNotStarted):
 		writeError(w, http.StatusInternalServerError, "调度器尚未就绪，请稍后再试")
 	default:

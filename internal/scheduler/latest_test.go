@@ -60,18 +60,47 @@ func TestScheduledRunsSkipIgnoredLatest(t *testing.T) {
 		t.Fatalf("task status = %s after a skipped schedule, want untouched", task.Status)
 	}
 
-	// Manual triggers still work for the same task.
+	// Manual triggers are refused too: the user asked for latest to be ignored
+	// entirely, so only a concrete tag/digest can be synchronised.
+	if _, err := env.sched.StartCheck(created.ID, model.TriggerManual); !errors.Is(err, ErrLatestIgnored) {
+		t.Fatalf("manual StartCheck error = %v, want ErrLatestIgnored", err)
+	}
+	if _, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false); !errors.Is(err, ErrLatestIgnored) {
+		t.Fatalf("manual TriggerSync error = %v, want ErrLatestIgnored", err)
+	}
+	if runs := env.store.ListRuns(10, ""); len(runs) != 0 {
+		t.Fatalf("manual refusals created %d runs, want 0", len(runs))
+	}
+}
+
+func TestManualRunsRefusedForIgnoredLatest(t *testing.T) {
+	env := newSchedEnv(t)
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "docker.io/library/nginx:latest"
+		task.IgnoreLatest = true
+	})
+
+	if _, err := env.sched.CheckNow(t.Context(), created.ID); !errors.Is(err, ErrLatestIgnored) {
+		t.Fatalf("CheckNow error = %v, want ErrLatestIgnored", err)
+	}
+	if runs := env.store.ListRuns(10, ""); len(runs) != 0 {
+		t.Fatalf("refused check created %d runs, want 0", len(runs))
+	}
+	task, _ := env.store.GetTask(created.ID)
+	if task.LastError != "" || task.Status == model.TaskStatusError {
+		t.Fatalf("refused check dirtied the task: status=%s lastError=%q", task.Status, task.LastError)
+	}
+
+	// Pinning a concrete tag lifts the restriction.
+	env.store.PatchTask(created.ID, func(t *model.Task) {
+		t.Image = "docker.io/library/nginx:1.27"
+	})
 	run, err := env.sched.StartCheck(created.ID, model.TriggerManual)
 	if err != nil {
-		t.Fatalf("manual StartCheck: %v", err)
+		t.Fatalf("manual StartCheck after pinning: %v", err)
 	}
-	done := env.waitRunDone(run.ID)
-	if done.Status != model.RunStatusSuccess {
+	if done := env.waitRunDone(run.ID); done.Status != model.RunStatusSuccess {
 		t.Fatalf("manual check status = %s error %q, want success", done.Status, done.Error)
-	}
-	task, _ = env.store.GetTask(created.ID)
-	if !task.UpdateAvailable || task.RemoteDigest != testDigest {
-		t.Fatalf("manual check did not record the remote digest: %+v", task)
 	}
 }
 

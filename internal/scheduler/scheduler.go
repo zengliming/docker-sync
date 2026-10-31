@@ -50,6 +50,9 @@ var (
 	// errIgnoredLatest means a scheduled trigger was skipped because the task
 	// watches the moving "latest" tag and asked for it to be ignored.
 	errIgnoredLatest = errors.New("task ignores the latest tag")
+	// ErrLatestIgnored means the task watches the moving "latest" tag and asked
+	// for it to be ignored, so a manual sync/check is refused as well.
+	ErrLatestIgnored = errors.New("task ignores the latest tag and cannot be synced")
 )
 
 // cronParser accepts exactly the standard five fields (minute hour dom month

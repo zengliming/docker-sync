@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -357,6 +358,30 @@ func TestSyncTask(t *testing.T) {
 	}
 	if rec := env.do(t, http.MethodPost, "/api/tasks/"+created.ID+"/sync", `{"force":"yes"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad body status = %d", rec.Code)
+	}
+}
+
+func TestLatestIgnoredTaskRefusesSyncAndCheck(t *testing.T) {
+	env := newTestEnv(t)
+	created := decodeBody[taskEnvelope](t, env.do(t, http.MethodPost, "/api/tasks",
+		`{"image":"nginx:latest","ignoreLatest":true}`))
+
+	env.sched.syncErr = fmt.Errorf("%w: latest", scheduler.ErrLatestIgnored)
+	rec := env.do(t, http.MethodPost, "/api/tasks/"+created.ID+"/sync", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("sync status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "忽略 latest") {
+		t.Fatalf("sync body = %s, want the ignore-latest hint", rec.Body.String())
+	}
+
+	env.sched.checkErr = fmt.Errorf("%w: latest", scheduler.ErrLatestIgnored)
+	rec = env.do(t, http.MethodPost, "/api/tasks/"+created.ID+"/check", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("check status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "忽略 latest") {
+		t.Fatalf("check body = %s, want the ignore-latest hint", rec.Body.String())
 	}
 }
 

@@ -87,7 +87,7 @@
 | `intervalMinutes` | interval 模式下间隔分钟数，最小 1 |
 | `cron` | cron 模式下的 5 段标准 cron（分 时 日 月 周），服务器本地时区 |
 | `autoSync` | 定时检查发现新 digest 时是否自动 pull 并生成 tar；false 时只记录 `updateAvailable` |
-| `ignoreLatest` | true 时，镜像 tag 为 `latest`（含不写 tag 的写法）的任务不参与定时检查与自动同步：不进调度（`nextRunAt` 为空）、不产生定时运行记录；手动「立即同步」「检查更新」不受影响。tag 改成具体版本或 digest 后自动恢复调度 |
+| `ignoreLatest` | true 时，镜像 tag 为 `latest`（含不写 tag 的写法）的任务整块忽略 latest：不进调度（`nextRunAt` 为空）、不产生定时运行记录，手动 `sync`/`check` 也返回 409。tag 改成具体版本或 digest 后自动恢复 |
 | `keepVersions` | 该任务保留的 tar 份数（1–50），旧文件自动清理 |
 | `status` | `idle` / `queued` / `running` / `error` / `paused` |
 | `lastDigest` | 上一次成功同步的平台 manifest digest |
@@ -132,8 +132,8 @@
 | GET | `/api/tasks/{id}` | → `Task`；不存在 404 |
 | PUT | `/api/tasks/{id}` | body=TaskInput → 200 `Task`（整体替换可编辑字段，保留运行状态字段） |
 | DELETE | `/api/tasks/{id}` | → `{"ok":true}`，同时删除该任务产生的 tar 文件 |
-| POST | `/api/tasks/{id}/sync` | body 可空或 `{"force":false}` → 202 `{"run":Run}`；任务不存在 404，已有运行中任务 409 |
-| POST | `/api/tasks/{id}/check` | 同步检查远端是否有更新 → 200 `{"updateAvailable":bool,"remoteDigest":"…","currentDigest":"…","image":"…","platform":"…"}`，失败 502 |
+| POST | `/api/tasks/{id}/sync` | body 可空或 `{"force":false}` → 202 `{"run":Run}`；任务不存在 404，已有运行中任务 409，任务勾选「忽略 latest」且镜像用 `latest` 时 409 |
+| POST | `/api/tasks/{id}/check` | 同步检查远端是否有更新 → 200 `{"updateAvailable":bool,"remoteDigest":"…","currentDigest":"…","image":"…","platform":"…"}`，失败 502，忽略 latest 时 409 |
 | GET | `/api/tasks/{id}/runs?limit=50` | → `{"runs":[Run...]}`（不含 `logs`），limit 默认 50，最大 200 |
 
 `POST /api/tasks/{id}/sync` 语义：
@@ -142,6 +142,8 @@
   `status="skipped"` 且已结束的 run（`updateAvailable=false`），不重复下载。
 - `force=true`：无论 digest 是否变化都重新下载并生成 tar。
 - 接口立即返回 202，前端通过轮询 `GET /api/runs/{id}` 或 SSE 跟踪进度。
+- 任务勾选了 `ignoreLatest` 且镜像引用解析出的 tag 是 `latest`（含不写 tag）时，`/sync` 与 `/check`
+  直接返回 **409**，`error` 形如 `任务已勾选「忽略 latest」：latest 标签不参与同步与检查，请把镜像改成具体版本（如 nginx:1.27）或取消勾选后再操作`。
 
 ## 运行记录
 
@@ -362,7 +364,7 @@ docker 客户端把本服务当作镜像仓库访问，接口遵循 Registry v2�
 | --- | --- |
 | 400 | 入参校验失败、非法文件名 |
 | 404 | 任务/运行记录/文件不存在 |
-| 409 | 任务已有正在运行的同步 |
+| 409 | 任务已有正在运行的同步；或任务勾选「忽略 latest」且镜像用 `latest` |
 | 502 | 访问镜像仓库失败（网络、鉴权、digest 校验等） |
 | 500 | 服务内部错误 |
 
