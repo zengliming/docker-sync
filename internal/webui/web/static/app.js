@@ -1068,14 +1068,31 @@
     if (!state.drawerRunId) {
       root.innerHTML = '';
       document.body.classList.remove('drawer-open');
+      state.drawerKey = null;
+      state.drawerShownRunId = null;
       return;
     }
+
+    const html = drawerHtml();
+    // 内容与上次完全一致时不要碰 DOM：轮询拿到的数据没变就不该重绘。
+    if (state.drawerKey === html) return;
+
+    const existing = root.querySelector('.drawer');
+    if (existing && state.drawerShownRunId === state.drawerRunId) {
+      // 同一次运行内的刷新：只替换真正变化的部分，避免整块重建导致侧边栏闪烁。
+      state.drawerKey = html;
+      patchDrawer(existing, html);
+      return;
+    }
+
+    state.drawerKey = html;
+    state.drawerShownRunId = state.drawerRunId;
 
     const prevList = root.querySelector('.log-list');
     const nearBottom = prevList ? (prevList.scrollHeight - prevList.scrollTop - prevList.clientHeight < 40) : true;
     const prevTop = prevList ? prevList.scrollTop : 0;
 
-    root.innerHTML = drawerHtml();
+    root.innerHTML = html;
     document.body.classList.add('drawer-open');
 
     const list = document.getElementById('run-log-list');
@@ -1085,11 +1102,86 @@
     }
   }
 
+  // patchDrawer 把新渲染结果和现有 DOM 逐块比较，只替换有变化的节点。
+  function patchDrawer(aside, html) {
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    // drawerHtml() 顶层是遮罩 + <aside class="drawer">，要取 aside 而不是第一个元素，
+    // 否则拿到的遮罩里没有任何子节点，比较全部落空、抽屉会永远停在「加载中」。
+    const next = holder.querySelector('.drawer');
+    if (!next) return;
+
+    const oldHead = aside.querySelector('.drawer-head');
+    const newHead = next.querySelector('.drawer-head');
+    if (oldHead && newHead && oldHead.innerHTML !== newHead.innerHTML) {
+      oldHead.innerHTML = newHead.innerHTML;
+    }
+
+    const oldBody = aside.querySelector('.drawer-body');
+    const newBody = next.querySelector('.drawer-body');
+    if (!oldBody || !newBody) return;
+
+    const oldSections = Array.from(oldBody.children);
+    const newSections = Array.from(newBody.children);
+    if (oldSections.length !== newSections.length) {
+      oldBody.innerHTML = newBody.innerHTML;
+      return;
+    }
+
+    for (let i = 0; i < newSections.length; i++) {
+      const oldNode = oldSections[i];
+      const newNode = newSections[i];
+      if (oldNode.outerHTML === newNode.outerHTML) continue;
+
+      const oldList = oldNode.querySelector('.log-list');
+      const newList = newNode.querySelector('.log-list');
+      if (oldList && newList) {
+        // 日志区单独处理：只追加新增的行，已渲染的行保持不动。
+        syncLogList(oldList, newList);
+        const oldHint = oldNode.querySelector('.muted');
+        const newHint = newNode.querySelector('.muted');
+        if (oldHint && newHint && oldHint.textContent !== newHint.textContent) {
+          oldHint.textContent = newHint.textContent;
+        }
+        continue;
+      }
+
+      oldNode.replaceWith(newNode);
+    }
+  }
+
+  function syncLogList(oldList, newList) {
+    const oldRows = Array.from(oldList.children);
+    const newRows = Array.from(newList.children);
+
+    const oldEmpty = oldRows.length === 1 && oldRows[0].classList.contains('log-empty');
+    const newEmpty = newRows.length === 1 && newRows[0].classList.contains('log-empty');
+    if (oldEmpty || newEmpty) {
+      if (oldList.innerHTML !== newList.innerHTML) oldList.innerHTML = newList.innerHTML;
+      return;
+    }
+
+    if (newRows.length <= oldRows.length) {
+      // 条数没增加（或日志被截断）时才整块替换。
+      if (oldList.innerHTML !== newList.innerHTML) oldList.innerHTML = newList.innerHTML;
+      return;
+    }
+
+    const nearBottom = oldList.scrollHeight - oldList.scrollTop - oldList.clientHeight < 40;
+    for (let i = oldRows.length; i < newRows.length; i++) {
+      oldList.appendChild(newRows[i].cloneNode(true));
+    }
+    if (nearBottom) oldList.scrollTop = oldList.scrollHeight;
+  }
+
   function openRunDrawer(id) {
     if (!id) return;
+    // 同一个运行重复打开时保留已有数据，避免先渲染骨架再回填造成闪动。
+    if (state.drawerRunId !== id) {
+      state.drawerRun = null;
+      state.drawerError = null;
+    }
     state.drawerRunId = id;
-    state.drawerRun = null;
-    state.drawerError = null;
     if (!state.drawerPause) {
       state.drawerPause = true;
       pauseAutoRefresh();
@@ -2381,10 +2473,16 @@
       } else {
         toast('同步已开始，正在跟踪运行进度', 'success');
       }
-      if (run && run.id) openRunDrawer(run.id);
-      loadTasks(true);
-      loadRuns(true);
-      loadOverview(true);
+      if (run && run.id) {
+        openRunDrawer(run.id);
+        // 抽屉打开期间页面数据是冻结的：只在抽屉里显示进度，关闭抽屉时再统一刷新
+        // 任务/运行/概览，否则这里同时拉三份数据会把整页重绘一遍（就是那种闪一下）。
+        state.refreshPending = true;
+      } else {
+        loadTasks(true);
+        loadRuns(true);
+        loadOverview(true);
+      }
     } catch (err) {
       toast(err.message, 'error');
       loadTasks(true);
@@ -2450,11 +2548,14 @@
       toast(err.message, 'error');
     } finally {
       setBusy(button, false);
-      // 手动上传同样会写入运行记录，这里同步刷新，方便立刻在「运行记录」里查看。
-      loadRuns(true);
-      loadOverview(true);
+      // 手动上传同样会写入运行记录；但抽屉一打开只让抽屉自己刷新，
+      // 列表数据等关闭抽屉时统一拉一次，避免整页跟着重绘。
       if (run && run.id) {
         openRunDrawer(run.id);
+        state.refreshPending = true;
+      } else {
+        loadRuns(true);
+        loadOverview(true);
       }
     }
   }
