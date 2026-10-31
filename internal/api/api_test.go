@@ -195,6 +195,7 @@ type taskEnvelope struct {
 	Enabled        bool   `json:"enabled"`
 	Status         string `json:"status"`
 	LastError      string `json:"lastError"`
+	ResolvedTag    string `json:"resolvedTag"`
 }
 
 func TestCreateTaskAppliesDefaults(t *testing.T) {
@@ -238,6 +239,15 @@ func TestTaskIgnoreLatestRoundTrip(t *testing.T) {
 		`{"image":"alpine:latest","enabled":true}`))
 	if updated.IgnoreLatest {
 		t.Fatalf("updated.ignoreLatest = true, want false after omitting the field")
+	}
+
+	// The scheduler records which concrete version it followed; the API exposes it.
+	env.store.PatchTask(created.ID, func(task *model.Task) {
+		task.ResolvedTag = "3.20.1"
+	})
+	got = decodeBody[taskEnvelope](t, env.do(t, http.MethodGet, "/api/tasks/"+created.ID, ""))
+	if got.ResolvedTag != "3.20.1" {
+		t.Fatalf("resolvedTag = %q, want 3.20.1", got.ResolvedTag)
 	}
 }
 
@@ -361,27 +371,26 @@ func TestSyncTask(t *testing.T) {
 	}
 }
 
-func TestLatestIgnoredTaskRefusesSyncAndCheck(t *testing.T) {
+// A task that follows the newest concrete version surfaces upstream failures
+// (the tag list cannot be read) as a gateway error, not a client error.
+func TestLatestFollowFailureIsReported(t *testing.T) {
 	env := newTestEnv(t)
 	created := decodeBody[taskEnvelope](t, env.do(t, http.MethodPost, "/api/tasks",
 		`{"image":"nginx:latest","ignoreLatest":true}`))
 
-	env.sched.syncErr = fmt.Errorf("%w: latest", scheduler.ErrLatestIgnored)
+	env.sched.syncErr = fmt.Errorf("%w: 列出 docker.io/library/nginx 的标签失败: boom", scheduler.ErrUpstream)
 	rec := env.do(t, http.MethodPost, "/api/tasks/"+created.ID+"/sync", "")
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("sync status = %d, body %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "忽略 latest") {
-		t.Fatalf("sync body = %s, want the ignore-latest hint", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "标签") {
+		t.Fatalf("sync body = %s, want the upstream hint", rec.Body.String())
 	}
 
-	env.sched.checkErr = fmt.Errorf("%w: latest", scheduler.ErrLatestIgnored)
+	env.sched.checkErr = env.sched.syncErr
 	rec = env.do(t, http.MethodPost, "/api/tasks/"+created.ID+"/check", "")
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("check status = %d, body %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "忽略 latest") {
-		t.Fatalf("check body = %s, want the ignore-latest hint", rec.Body.String())
 	}
 }
 

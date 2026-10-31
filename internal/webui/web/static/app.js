@@ -781,35 +781,47 @@
     return true;
   }
 
-  // taskLatestIgnored reports whether syncs and checks are refused for this task.
-  function taskLatestIgnored(task) {
+  // taskFollowsLatest reports whether the task follows the newest concrete
+  // version of a moving latest tag instead of syncing the tag itself.
+  function taskFollowsLatest(task) {
     return !!(task && task.ignoreLatest) && taskWatchesLatest(task);
   }
 
   function taskActions(task) {
     const busy = task.status === 'running' || task.status === 'queued';
-    const refused = taskLatestIgnored(task);
-    const refuseHint = '任务已勾选「忽略 latest」：latest 标签不参与同步与检查，请把镜像改成具体版本（如 nginx:1.27）或取消勾选后再操作';
     return '<div class="row-actions">' +
-      btn(busy ? '同步中' : '立即同步', 'task-sync', { data: { id: task.id }, cls: 'btn-primary', size: 'sm', disabled: busy || refused, title: refused ? refuseHint : '' }) +
-      btn('检查更新', 'task-check', { data: { id: task.id }, size: 'sm', disabled: refused, title: refused ? refuseHint : '' }) +
+      btn(busy ? '同步中' : '立即同步', 'task-sync', { data: { id: task.id }, cls: 'btn-primary', size: 'sm', disabled: busy }) +
+      btn('检查更新', 'task-check', { data: { id: task.id }, size: 'sm' }) +
       btn(task.enabled ? '暂停' : '启用', 'task-toggle', { data: { id: task.id }, size: 'sm' }) +
       btn('编辑', 'task-edit', { data: { id: task.id }, size: 'sm' }) +
       btn('删除', 'task-delete', { data: { id: task.id }, cls: 'btn-danger', size: 'sm' }) +
       '</div>';
   }
 
+  // followLatestBadge explains which concrete version a latest-following task
+  // is currently pinned to.
+  function followLatestBadge(task) {
+    if (!task.ignoreLatest) return '';
+    const follows = taskFollowsLatest(task);
+    const followed = follows
+      ? (task.resolvedTag ? '跟随 ' + task.resolvedTag : '跟随最新版本')
+      : '忽略 latest';
+    const hint = follows
+      ? '勾选了「忽略 latest」：定时检查与手动同步都会先向上游查出最新具体版本' +
+        (task.resolvedTag ? '（当前 ' + task.resolvedTag + '）' : '') +
+        '，再拉取该版本，不会同步 latest 本身'
+      : '勾选了「忽略 latest」，但镜像带有具体版本标签，按该标签同步';
+    return '<div class="cell-sub"><span class="badge badge-latest" title="' + esc(hint) + '">' + esc(followed) + '</span></div>';
+  }
+
   function taskRowHtml(task) {
     const errorLine = task.lastError
       ? '<div class="cell-sub error-text" title="' + esc(task.lastError) + '">' + esc(truncate(task.lastError, 30)) + '</div>'
       : '';
-    const ignoreLatestLine = task.ignoreLatest
-      ? '<div class="cell-sub"><span class="badge badge-latest" title="latest 标签不参与定时检查、自动同步，手动同步与检查也会被拒绝；改成具体版本后恢复正常">忽略 latest</span></div>'
-      : '';
     return '<tr>' +
       '<td><div class="cell-main">' + esc(task.name || task.image || task.id) + '</div>' +
       '<div class="cell-sub mono" title="' + esc(task.image || '') + '">' + esc(task.image || '') + '</div>' +
-      ignoreLatestLine + '</td>' +
+      followLatestBadge(task) + '</td>' +
       '<td><span class="mono">' + esc(task.platform || '默认') + '</span></td>' +
       '<td>' + scheduleCell(task) + '</td>' +
       '<td>' + taskStatusBadge(task.status, task.lastError) + errorLine + '</td>' +
@@ -1973,7 +1985,7 @@
       '</label></div>' +
       '<div class="field"><label class="check" for="task-ignore-latest">' +
       '<input id="task-ignore-latest" name="ignoreLatest" type="checkbox"' + (ignoreLatest ? ' checked' : '') + '>' +
-      '<span>忽略 latest<small>勾选后 latest 标签既不参与定时检查、也不自动同步，手动「立即同步」同样会被拦下；需要拉取时把镜像改成具体版本（如 nginx:1.27）。</small></span>' +
+      '<span>忽略 latest<small>勾选后不直接拉取 latest：每次定时检查与手动同步都会先向上游查出最新具体版本（如 3.20.1），再同步该版本，版本号可在任务行看到。镜像本身带具体版本标签时按标签同步。</small></span>' +
       '</label></div>' +
       '<div class="grid-2">' +
       '<div class="field"><label for="task-keep">保留份数</label>' +

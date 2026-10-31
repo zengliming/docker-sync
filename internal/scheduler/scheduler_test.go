@@ -33,6 +33,36 @@ type fakeRegistry struct {
 	configDigest     string
 	downloadProgress bool
 	downloadErr      error
+	tags             []string
+	tagsErr          error
+	listCalls        int
+	resolvedTags     []string
+}
+
+// ListTags returns the configured tag list; latest-ignoring tasks use it to
+// follow the newest concrete version.
+func (f *fakeRegistry) ListTags(_ context.Context, _ registry.Ref) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listCalls++
+	if f.tagsErr != nil {
+		return nil, f.tagsErr
+	}
+	return append([]string(nil), f.tags...), nil
+}
+
+// listCount reports how often ListTags was called.
+func (f *fakeRegistry) listCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
+}
+
+// tagsResolved returns the tags passed to Resolve, in call order.
+func (f *fakeRegistry) tagsResolved() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.resolvedTags...)
 }
 
 func (f *fakeRegistry) Resolve(ctx context.Context, ref registry.Ref, platform string) (*registry.Image, error) {
@@ -45,6 +75,7 @@ func (f *fakeRegistry) Resolve(ctx context.Context, ref registry.Ref, platform s
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.resolvedTags = append(f.resolvedTags, ref.Tag)
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}

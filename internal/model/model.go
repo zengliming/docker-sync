@@ -73,9 +73,10 @@ type Task struct {
 	// scheduled check detects a new digest. When false the check only records
 	// that an update is available.
 	AutoSync bool `json:"autoSync"`
-	// IgnoreLatest skips scheduled checks and automatic pulls for tasks whose
-	// reference points at the "latest" tag, because that tag moves on every
-	// upstream push. Manual syncs and manual checks still run.
+	// IgnoreLatest makes a task whose reference points at the "latest" tag skip
+	// that moving tag: the scheduler looks up the newest concrete version
+	// published upstream (for example alpine:3.20.3) and syncs that instead.
+	// Both scheduled and manual runs follow the resolved version.
 	IgnoreLatest bool `json:"ignoreLatest"`
 	// KeepVersions is how many tar artifacts are kept per task (>= 1).
 	KeepVersions int  `json:"keepVersions"`
@@ -92,6 +93,9 @@ type Task struct {
 	// LastDigest. It is cleared by a successful sync.
 	UpdateAvailable bool   `json:"updateAvailable"`
 	RemoteDigest    string `json:"remoteDigest"`
+	// ResolvedTag is the concrete tag the latest-ignoring tasks resolved to on
+	// the last run (empty for tasks that track an explicit version).
+	ResolvedTag string `json:"resolvedTag,omitempty"`
 
 	LatestTar     string `json:"latestTar"`
 	LatestTarSize int64  `json:"latestTarSize"`

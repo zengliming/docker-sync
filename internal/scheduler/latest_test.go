@@ -2,167 +2,337 @@ package scheduler
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"docker-sync/internal/model"
+	"docker-sync/internal/store"
 )
 
-func TestLatestTagIgnored(t *testing.T) {
+func TestIgnoredLatestTagMatches(t *testing.T) {
 	const digestRef = "alpine@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	cases := []struct {
-		name    string
-		image   string
-		trigger string
-		ignore  bool
-		want    bool
+		name   string
+		image  string
+		ignore bool
+		want   bool
 	}{
-		{"latest tag", "alpine:latest", model.TriggerSchedule, true, true},
-		{"implicit latest", "alpine", model.TriggerSchedule, true, true},
-		{"explicit docker hub", "docker.io/library/alpine:latest", model.TriggerSchedule, true, true},
-		{"pinned tag", "alpine:3.20", model.TriggerSchedule, true, false},
-		{"digest reference", digestRef, model.TriggerSchedule, true, false},
-		{"switch off", "alpine:latest", model.TriggerSchedule, false, false},
-		{"manual sync", "alpine:latest", model.TriggerManual, true, false},
-		{"manual check", "alpine:latest", model.TriggerCheck, true, false},
+		{"latest tag", "alpine:latest", true, true},
+		{"implicit latest", "alpine", true, true},
+		{"explicit docker hub", "docker.io/library/alpine:latest", true, true},
+		{"pinned tag", "alpine:3.20", true, false},
+		{"digest reference", digestRef, true, false},
+		{"switch off", "alpine:latest", false, false},
 	}
 	for _, tc := range cases {
 		task := model.Task{Image: tc.image, IgnoreLatest: tc.ignore}
-		if got := latestTagIgnored(task, tc.trigger); got != tc.want {
-			t.Errorf("%s: latestTagIgnored(%q, %q) = %v, want %v", tc.name, tc.image, tc.trigger, got, tc.want)
+		if got := ignoredLatestTag(task); got != tc.want {
+			t.Errorf("%s: ignoredLatestTag(%q) = %v, want %v", tc.name, tc.image, got, tc.want)
 		}
 	}
 }
 
-func TestScheduledRunsSkipIgnoredLatest(t *testing.T) {
+func TestPickNewestTag(t *testing.T) {
+	cases := []struct {
+		name    string
+		tags    []string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "semver wins over latest and flavours",
+			tags: []string{"latest", "3.20-alpine", "3.19.9", "3.20", "3.20.1", "stable"},
+			want: "3.20.1",
+		},
+		{
+			name: "leading v accepted",
+			tags: []string{"v1.9.0", "v1.10.0", "v1.2.3"},
+			want: "v1.10.0",
+		},
+		{
+			name: "prereleases and word tags ignored",
+			tags: []string{"latest", "edge", "2.0.0-rc1", "1.4.2"},
+			want: "1.4.2",
+		},
+		{
+			name: "date stamped snapshots lose to the release line",
+			tags: []string{"latest", "20260805", "3.20.1", "3.20", "20260731"},
+			want: "3.20.1",
+		},
+		{
+			name: "single component versions still work alone",
+			tags: []string{"latest", "20260805", "20260731"},
+			want: "20260805",
+		},
+		{
+			name: "equal versions keep the first seen",
+			tags: []string{"3.20", "3.20.0"},
+			want: "3.20",
+		},
+		{
+			name:    "no version tags",
+			tags:    []string{"latest", "stable", "edge"},
+			wantErr: "没有形如 1.2.3 的版本标签",
+		},
+		{name: "empty list", wantErr: "没有形如 1.2.3 的版本标签"},
+	}
+	for _, tc := range cases {
+		got, err := pickNewestTag(tc.tags)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: pickNewestTag(%v) = %q, want %q", tc.name, tc.tags, got, tc.want)
+		}
+	}
+}
+
+// seedArchive gives the task a finished tar for the fake digest so the next sync
+// takes the digest-skip path: the resolution still runs, but no packing is
+// needed (the fake registry does not produce blobs).
+func seedArchive(t *testing.T, env *schedEnv, taskID string) string {
+	t.Helper()
+	const tarName = "library_alpine_3.20.1_linux_amd64_111111111111.tar"
+	if err := os.WriteFile(env.store.TarPath(tarName), []byte("fake tar"), 0o644); err != nil {
+		t.Fatalf("write tar: %v", err)
+	}
+	env.store.PutTarFile(store.TarFile{Name: tarName, Size: 8, ModTime: time.Now(), TaskID: taskID})
+	env.store.PatchTask(taskID, func(task *model.Task) {
+		task.LastDigest = testDigest
+		task.LatestTar = tarName
+		task.LatestTarSize = 8
+	})
+	return tarName
+}
+
+// TestIgnoredLatestSyncsNewestVersion is the core behaviour: a task pointing at
+// latest syncs the newest concrete version instead of the moving tag.
+func TestIgnoredLatestSyncsNewestVersion(t *testing.T) {
 	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "3.19.9", "3.20", "3.20.1", "edge"}
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "docker.io/library/alpine:latest"
+		task.IgnoreLatest = true
+	})
+	seedArchive(t, env, created.ID)
+
+	run, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false)
+	if err != nil {
+		t.Fatalf("TriggerSync: %v", err)
+	}
+	done := env.waitRunDone(run.ID)
+	if done.Status != model.RunStatusSkipped {
+		t.Fatalf("run status = %s error %q, want skipped", done.Status, done.Error)
+	}
+	if got := env.fake.tagsResolved(); len(got) != 1 || got[0] != "3.20.1" {
+		t.Fatalf("resolved tags = %v, want [3.20.1]", got)
+	}
+	if !strings.Contains(done.Image, "alpine:3.20.1") {
+		t.Fatalf("run image = %q, want the concrete version", done.Image)
+	}
+	task, _ := env.store.GetTask(created.ID)
+	if task.ResolvedTag != "3.20.1" {
+		t.Fatalf("task resolvedTag = %q, want 3.20.1", task.ResolvedTag)
+	}
+}
+
+// TestIgnoredLatestScheduledCheckFollowsNewestVersion proves scheduled checks run
+// (no more skipping) and follow the concrete version.
+func TestIgnoredLatestScheduledCheckFollowsNewestVersion(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "3.20.1", "3.21.0"}
 	created := env.createTask(func(task *model.Task) {
 		task.Image = "alpine:latest"
 		task.IgnoreLatest = true
 	})
 
-	if _, err := env.sched.StartCheck(created.ID, model.TriggerSchedule); !errors.Is(err, errIgnoredLatest) {
-		t.Fatalf("scheduled StartCheck error = %v, want errIgnoredLatest", err)
+	run, err := env.sched.StartCheck(created.ID, model.TriggerSchedule)
+	if err != nil {
+		t.Fatalf("StartCheck: %v", err)
 	}
-	if _, err := env.sched.TriggerSync(created.ID, model.TriggerSchedule, false); !errors.Is(err, errIgnoredLatest) {
-		t.Fatalf("scheduled TriggerSync error = %v, want errIgnoredLatest", err)
+	done := env.waitRunDone(run.ID)
+	if done.Status != model.RunStatusSuccess {
+		t.Fatalf("run status = %s error %q, want success", done.Status, done.Error)
 	}
-	if runs := env.store.ListRuns(10, ""); len(runs) != 0 {
-		t.Fatalf("scheduled runs = %d, want 0 (skipped before creating a run)", len(runs))
+	if done.Trigger != model.TriggerSchedule {
+		t.Fatalf("trigger = %s", done.Trigger)
+	}
+	if got := env.fake.tagsResolved(); len(got) == 0 {
+		t.Fatalf("no resolve calls, want the concrete version")
+	} else {
+		for i, tag := range got {
+			if tag != "3.21.0" {
+				t.Fatalf("resolve %d used tag %q, want 3.21.0", i, tag)
+			}
+		}
+	}
+	task, _ := env.store.GetTask(created.ID)
+	if task.ResolvedTag != "3.21.0" {
+		t.Fatalf("task resolvedTag = %q, want 3.21.0", task.ResolvedTag)
+	}
+}
+
+// TestIgnoredLatestFailsWhenUpstreamHasNoVersions keeps the failure readable
+// when a repository only publishes moving or flavour tags.
+func TestIgnoredLatestFailsWhenUpstreamHasNoVersions(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "stable"}
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "alpine:latest"
+		task.IgnoreLatest = true
+	})
+
+	run, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false)
+	if err != nil {
+		t.Fatalf("TriggerSync: %v", err)
+	}
+	done := env.waitRunDone(run.ID)
+	if done.Status != model.RunStatusError {
+		t.Fatalf("run status = %s, want error", done.Status)
+	}
+	if !strings.Contains(done.Error, "没有形如 1.2.3 的版本标签") {
+		t.Fatalf("run error = %q", done.Error)
 	}
 	if env.fake.downloadCount() != 0 {
 		t.Fatalf("downloads = %d, want 0", env.fake.downloadCount())
 	}
-	task, ok := env.store.GetTask(created.ID)
-	if !ok {
-		t.Fatalf("task %s vanished", created.ID)
-	}
-	if task.Status == model.TaskStatusRunning || task.Status == model.TaskStatusQueued {
-		t.Fatalf("task status = %s after a skipped schedule, want untouched", task.Status)
-	}
-
-	// Manual triggers are refused too: the user asked for latest to be ignored
-	// entirely, so only a concrete tag/digest can be synchronised.
-	if _, err := env.sched.StartCheck(created.ID, model.TriggerManual); !errors.Is(err, ErrLatestIgnored) {
-		t.Fatalf("manual StartCheck error = %v, want ErrLatestIgnored", err)
-	}
-	if _, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false); !errors.Is(err, ErrLatestIgnored) {
-		t.Fatalf("manual TriggerSync error = %v, want ErrLatestIgnored", err)
-	}
-	if runs := env.store.ListRuns(10, ""); len(runs) != 0 {
-		t.Fatalf("manual refusals created %d runs, want 0", len(runs))
+	task, _ := env.store.GetTask(created.ID)
+	if !strings.Contains(task.LastError, "没有形如 1.2.3 的版本标签") {
+		t.Fatalf("task lastError = %q", task.LastError)
 	}
 }
 
-func TestManualRunsRefusedForIgnoredLatest(t *testing.T) {
+// TestIgnoredLatestTaskKeepsSchedule: ignoring latest no longer removes the task
+// from the schedule, it only changes which tag is fetched.
+func TestIgnoredLatestTaskKeepsSchedule(t *testing.T) {
 	env := newSchedEnv(t)
 	created := env.createTask(func(task *model.Task) {
-		task.Image = "docker.io/library/nginx:latest"
+		task.Image = "alpine:latest"
+		task.IgnoreLatest = true
+	})
+	env.sched.TaskChanged(created.ID)
+	task, _ := env.store.GetTask(created.ID)
+	if task.NextRunAt == nil {
+		t.Fatalf("nextRunAt = nil, want a scheduled check")
+	}
+}
+
+// TestPinnedTagIgnoresResolution makes sure tasks with an explicit tag leave the
+// tag list alone.
+func TestPinnedTagIgnoresResolution(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "3.20.1"}
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "alpine:3.20"
 		task.IgnoreLatest = true
 	})
 
-	if _, err := env.sched.CheckNow(t.Context(), created.ID); !errors.Is(err, ErrLatestIgnored) {
-		t.Fatalf("CheckNow error = %v, want ErrLatestIgnored", err)
-	}
-	if runs := env.store.ListRuns(10, ""); len(runs) != 0 {
-		t.Fatalf("refused check created %d runs, want 0", len(runs))
-	}
-	task, _ := env.store.GetTask(created.ID)
-	if task.LastError != "" || task.Status == model.TaskStatusError {
-		t.Fatalf("refused check dirtied the task: status=%s lastError=%q", task.Status, task.LastError)
-	}
-
-	// Pinning a concrete tag lifts the restriction.
-	env.store.PatchTask(created.ID, func(t *model.Task) {
-		t.Image = "docker.io/library/nginx:1.27"
-	})
 	run, err := env.sched.StartCheck(created.ID, model.TriggerManual)
 	if err != nil {
-		t.Fatalf("manual StartCheck after pinning: %v", err)
+		t.Fatalf("StartCheck: %v", err)
 	}
 	if done := env.waitRunDone(run.ID); done.Status != model.RunStatusSuccess {
-		t.Fatalf("manual check status = %s error %q, want success", done.Status, done.Error)
+		t.Fatalf("run status = %s error %q", done.Status, done.Error)
 	}
-}
-
-func TestIgnoredLatestTaskHasNoSchedule(t *testing.T) {
-	env := newSchedEnv(t)
-	created := env.createTask(func(task *model.Task) {
-		task.Image = "alpine:latest"
-		task.IgnoreLatest = true
-	})
-	env.sched.TaskChanged(created.ID)
-	task, ok := env.store.GetTask(created.ID)
-	if !ok {
-		t.Fatalf("task %s vanished", created.ID)
-	}
-	if task.NextRunAt != nil {
-		t.Fatalf("nextRunAt = %v, want nil for an ignored latest task", task.NextRunAt)
-	}
-
-	// Pinning a real tag schedules the task again.
-	env.store.PatchTask(created.ID, func(t *model.Task) {
-		t.Image = "docker.io/library/alpine:3.20"
-	})
-	env.sched.TaskChanged(created.ID)
-	task, _ = env.store.GetTask(created.ID)
-	if task.NextRunAt == nil {
-		t.Fatalf("nextRunAt = nil after pinning a tag")
-	}
-}
-
-func TestQueuedScheduleSkipsWhenTaskStartsIgnoringLatest(t *testing.T) {
-	env := newSchedEnv(t)
-	created := env.createTask(func(task *model.Task) {
-		task.Image = "alpine:latest"
-	})
-
-	// The task opts out after the job was queued, so the executor must skip it.
-	env.store.PatchTask(created.ID, func(task *model.Task) {
-		task.IgnoreLatest = true
-	})
-	run, err := env.store.CreateRun(model.Run{
-		TaskID:   created.ID,
-		TaskName: created.Name,
-		Image:    created.Image,
-		Platform: created.Platform,
-		Trigger:  model.TriggerSchedule,
-	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
+	if env.fake.listCount() != 0 {
+		t.Fatalf("ListTags called %d times for a pinned tag, want 0", env.fake.listCount())
 	}
 	task, _ := env.store.GetTask(created.ID)
-	if execute := env.sched.executeCheck(&job{kind: kindCheck, runID: run.ID, taskID: created.ID, trigger: model.TriggerSchedule}); execute {
-		t.Fatalf("executeCheck asked for an automatic sync, want skip")
+	if task.ResolvedTag != "" {
+		t.Fatalf("resolvedTag = %q, want empty for a pinned tag", task.ResolvedTag)
 	}
-	done, ok := env.store.GetRun(run.ID)
-	if !ok {
-		t.Fatalf("run %s vanished", run.ID)
+}
+
+// TestCheckNowFollowsNewestVersion covers the synchronous manual check path.
+func TestCheckNowFollowsNewestVersion(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "3.19.9", "3.20.1"}
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "alpine:latest"
+		task.IgnoreLatest = true
+	})
+
+	res, err := env.sched.CheckNow(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("CheckNow: %v", err)
 	}
-	if done.Status != model.RunStatusSkipped {
-		t.Fatalf("run status = %s, want skipped", done.Status)
+	if !strings.Contains(res.Image, "alpine:3.20.1") {
+		t.Fatalf("checked image = %q, want the concrete version", res.Image)
 	}
-	if env.fake.downloadCount() != 0 {
-		t.Fatalf("downloads = %d, want 0", env.fake.downloadCount())
+	task, _ := env.store.GetTask(created.ID)
+	if task.ResolvedTag != "3.20.1" {
+		t.Fatalf("resolvedTag = %q, want 3.20.1", task.ResolvedTag)
 	}
-	_ = task
+}
+
+// TestLatestResolutionErrorIsReported surfaces a failing tags/list call.
+func TestLatestResolutionErrorIsReported(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tagsErr = errors.New("registry: unauthorized")
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "alpine:latest"
+		task.IgnoreLatest = true
+	})
+
+	run, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false)
+	if err != nil {
+		t.Fatalf("TriggerSync: %v", err)
+	}
+	done := env.waitRunDone(run.ID)
+	if done.Status != model.RunStatusError {
+		t.Fatalf("run status = %s, want error", done.Status)
+	}
+	if !strings.Contains(done.Error, "列出") || !strings.Contains(done.Error, "unauthorized") {
+		t.Fatalf("run error = %q", done.Error)
+	}
+}
+
+// TestIgnoredLatestResolvesOnEverySync proves the newest version is looked up on
+// every run, so a fresh upstream release is picked up without touching the task.
+func TestIgnoredLatestResolvesOnEverySync(t *testing.T) {
+	env := newSchedEnv(t)
+	env.fake.tags = []string{"latest", "3.20.1"}
+	created := env.createTask(func(task *model.Task) {
+		task.Image = "alpine:latest"
+		task.IgnoreLatest = true
+	})
+	seedArchive(t, env, created.ID)
+
+	first, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false)
+	if err != nil {
+		t.Fatalf("first TriggerSync: %v", err)
+	}
+	if done := env.waitRunDone(first.ID); done.Status != model.RunStatusSkipped {
+		t.Fatalf("first run status = %s error %q", done.Status, done.Error)
+	}
+
+	// A new release appears upstream: the next run must resolve again and see it.
+	env.fake.mu.Lock()
+	env.fake.tags = []string{"latest", "3.20.1", "3.21.0"}
+	env.fake.digest = "sha256:" + strings.Repeat("9", 64)
+	env.fake.mu.Unlock()
+
+	second, err := env.sched.TriggerSync(created.ID, model.TriggerManual, false)
+	if err != nil {
+		t.Fatalf("second TriggerSync: %v", err)
+	}
+	if done := env.waitRunDone(second.ID); done.Status == model.RunStatusSkipped && done.RemoteDigest == testDigest {
+		t.Fatalf("second run reused the old digest, want the new release")
+	}
+	if got := env.fake.tagsResolved(); len(got) != 2 || got[0] != "3.20.1" || got[1] != "3.21.0" {
+		t.Fatalf("resolved tags = %v, want [3.20.1 3.21.0]", got)
+	}
+	task, _ := env.store.GetTask(created.ID)
+	if task.ResolvedTag != "3.21.0" {
+		t.Fatalf("resolvedTag = %q, want 3.21.0", task.ResolvedTag)
+	}
 }

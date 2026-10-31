@@ -26,9 +26,8 @@ type CheckResult struct {
 }
 
 // ignoredLatestTag reports whether the task watches the moving "latest" tag and
-// opted out of everything except an explicit version: with IgnoreLatest set,
-// such a task is skipped by the scheduler and also refuses manual syncs until
-// the image is pinned to a concrete tag or digest.
+// opted out of automatic checks and syncs. Manual runs stay available: the tag
+// is only skipped by the scheduler, never by an explicit user action.
 func ignoredLatestTag(task model.Task) bool {
 	if !task.IgnoreLatest {
 		return false
@@ -43,19 +42,6 @@ func ignoredLatestTag(task model.Task) bool {
 	return ref.Tag == "latest"
 }
 
-// latestTagIgnored reports whether an automatic run must be skipped because the
-// task watches the moving "latest" tag and opted out of automatic checks.
-func latestTagIgnored(task model.Task, trigger string) bool {
-	return trigger == model.TriggerSchedule && ignoredLatestTag(task)
-}
-
-// refusedLatestError explains why a manual run of a latest-tagged task is
-// rejected: the user asked for latest to be ignored entirely.
-func refusedLatestError(task model.Task) error {
-	return fmt.Errorf("%w: 镜像 %s 使用 latest 标签，已勾选「忽略 latest」；请把镜像改成具体版本（如 nginx:1.27）或取消勾选后再同步",
-		ErrLatestIgnored, task.Image)
-}
-
 // TriggerSync queues a full synchronisation of the task. trigger is
 // model.TriggerManual for user triggered syncs and model.TriggerSchedule for
 // automatic follow-up syncs. force bypasses the digest skip optimisation.
@@ -66,13 +52,6 @@ func (s *Scheduler) TriggerSync(taskID, trigger string, force bool) (model.Run, 
 	task, ok := s.store.GetTask(taskID)
 	if !ok {
 		return model.Run{}, ErrNotFound
-	}
-	if latestTagIgnored(task, trigger) {
-		s.reschedule(taskID)
-		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
-	}
-	if ignoredLatestTag(task) {
-		return model.Run{}, refusedLatestError(task)
 	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
@@ -108,13 +87,6 @@ func (s *Scheduler) StartCheck(taskID, trigger string) (model.Run, error) {
 	}
 	if trigger == model.TriggerSchedule && !task.Enabled {
 		return model.Run{}, fmt.Errorf("%w: %s", errDisabled, taskID)
-	}
-	if latestTagIgnored(task, trigger) {
-		s.reschedule(taskID)
-		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
-	}
-	if ignoredLatestTag(task) {
-		return model.Run{}, refusedLatestError(task)
 	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
@@ -156,7 +128,12 @@ func (s *Scheduler) CheckNow(ctx context.Context, taskID string) (CheckResult, e
 		return CheckResult{}, fmt.Errorf("%w: 解析镜像引用 %q 失败: %v", ErrInvalidInput, task.Image, err)
 	}
 	if ignoredLatestTag(task) {
-		return CheckResult{}, refusedLatestError(task)
+		target, err := s.latestTarget(ctx, task, ref)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		ref = target
+		s.store.PatchTask(taskID, func(t *model.Task) { t.ResolvedTag = ref.Tag })
 	}
 	platform, err := s.platformFor(task)
 	if err != nil {
@@ -192,10 +169,6 @@ func (s *Scheduler) executeSync(j *job) {
 		s.finishRun(j.runID, model.RunStatusCanceled, "任务已删除", nil, time.Now())
 		return
 	}
-	if latestTagIgnored(task, j.trigger) {
-		s.finishRun(j.runID, model.RunStatusSkipped, "已忽略 latest 标签，跳过自动同步", nil, time.Now())
-		return
-	}
 	s.startRun(j, task, model.PhaseResolving)
 
 	ref, err := registry.Parse(task.Image)
@@ -205,6 +178,19 @@ func (s *Scheduler) executeSync(j *job) {
 		}
 		s.failRun(j.runID, j.taskID, "解析镜像引用失败", err)
 		return
+	}
+	if ignoredLatestTag(task) {
+		target, err := s.latestTarget(ctx, task, ref)
+		if err != nil {
+			if s.canceled(ctx, j) {
+				return
+			}
+			s.failRun(j.runID, j.taskID, "确定最新版本失败", err)
+			return
+		}
+		s.logRun(j.runID, model.LevelInfo, "已勾选忽略 latest：上游最新版本为 %s", target.Tag)
+		ref = target
+		s.store.PatchTask(j.taskID, func(t *model.Task) { t.ResolvedTag = ref.Tag })
 	}
 	platform, err := s.platformFor(task)
 	if err != nil {
@@ -417,10 +403,6 @@ func (s *Scheduler) executeCheck(j *job) bool {
 		s.finishRun(j.runID, model.RunStatusCanceled, "任务已禁用，跳过检查", nil, time.Now())
 		return false
 	}
-	if latestTagIgnored(task, j.trigger) {
-		s.finishRun(j.runID, model.RunStatusSkipped, "已忽略 latest 标签，跳过自动检查", nil, time.Now())
-		return false
-	}
 	s.startRun(j, task, model.PhaseResolving)
 
 	ref, err := registry.Parse(task.Image)
@@ -430,6 +412,19 @@ func (s *Scheduler) executeCheck(j *job) bool {
 		}
 		s.failRun(j.runID, j.taskID, "解析镜像引用失败", err)
 		return false
+	}
+	if ignoredLatestTag(task) {
+		target, err := s.latestTarget(ctx, task, ref)
+		if err != nil {
+			if s.canceled(ctx, j) {
+				return false
+			}
+			s.failRun(j.runID, j.taskID, "确定最新版本失败", err)
+			return false
+		}
+		s.logRun(j.runID, model.LevelInfo, "已勾选忽略 latest：上游最新版本为 %s", target.Tag)
+		ref = target
+		s.store.PatchTask(j.taskID, func(t *model.Task) { t.ResolvedTag = ref.Tag })
 	}
 	platform, err := s.platformFor(task)
 	if err != nil {

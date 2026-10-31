@@ -45,14 +45,11 @@ var (
 	ErrNotStarted = errors.New("scheduler is not running")
 	// ErrInvalidInput means the task configuration cannot be executed.
 	ErrInvalidInput = errors.New("invalid task")
+	// ErrUpstream means the upstream registry could not be asked for something
+	// the run needs, for example the tag list of a latest-following task.
+	ErrUpstream = errors.New("upstream registry error")
 	// errDisabled means a scheduled trigger found the task disabled.
 	errDisabled = errors.New("task is disabled")
-	// errIgnoredLatest means a scheduled trigger was skipped because the task
-	// watches the moving "latest" tag and asked for it to be ignored.
-	errIgnoredLatest = errors.New("task ignores the latest tag")
-	// ErrLatestIgnored means the task watches the moving "latest" tag and asked
-	// for it to be ignored, so a manual sync/check is refused as well.
-	ErrLatestIgnored = errors.New("task ignores the latest tag and cannot be synced")
 )
 
 // cronParser accepts exactly the standard five fields (minute hour dom month
@@ -76,6 +73,9 @@ func ValidateCron(spec string) error {
 type RegistryAPI interface {
 	Resolve(ctx context.Context, ref registry.Ref, platform string) (*registry.Image, error)
 	Download(ctx context.Context, img *registry.Image, sink registry.BlobSink, progress func(done, total int, layer registry.Layer)) (registry.DownloadStats, error)
+	// ListTags lists the tags published for the repository; latest-ignoring
+	// tasks use it to follow the newest concrete version instead of "latest".
+	ListTags(ctx context.Context, ref registry.Ref) ([]string, error)
 }
 
 // Options configures New.
@@ -383,7 +383,7 @@ func (s *Scheduler) checkDueTasks() {
 		}
 		entry := t
 		if _, err := s.StartCheck(entry.ID, model.TriggerSchedule); err != nil {
-			if errors.Is(err, ErrBusy) || errors.Is(err, errIgnoredLatest) {
+			if errors.Is(err, ErrBusy) {
 				continue
 			}
 			s.log.Warn("定时检查启动失败", "task", entry.ID, "image", entry.Image, "error", err)
@@ -482,10 +482,6 @@ func (s *Scheduler) syncCronEntry(task *model.Task) {
 	if !task.Enabled || task.ScheduleType != model.ScheduleCron {
 		return
 	}
-	if latestTagIgnored(*task, model.TriggerSchedule) {
-		// 忽略 latest 的任务只保留手动触发，不安装 cron 条目。
-		return
-	}
 	spec := strings.TrimSpace(task.Cron)
 	if _, err := cronParser.Parse(spec); err != nil {
 		s.log.Warn("任务 cron 表达式无效，忽略该任务", "task", task.ID, "cron", task.Cron, "error", err)
@@ -495,7 +491,7 @@ func (s *Scheduler) syncCronEntry(task *model.Task) {
 	image := task.Image
 	id, err := s.cron.AddFunc(spec, func() {
 		if _, err := s.StartCheck(taskID, model.TriggerSchedule); err != nil {
-			if errors.Is(err, ErrBusy) || errors.Is(err, errDisabled) || errors.Is(err, errIgnoredLatest) {
+			if errors.Is(err, ErrBusy) || errors.Is(err, errDisabled) {
 				return
 			}
 			s.log.Warn("cron 检查启动失败", "task", taskID, "image", image, "error", err)
@@ -543,10 +539,6 @@ func (s *Scheduler) reschedule(taskID string) {
 
 // computeNext returns the next scheduled check time for a task.
 func (s *Scheduler) computeNext(task model.Task, now time.Time) *time.Time {
-	if latestTagIgnored(task, model.TriggerSchedule) {
-		// 忽略 latest 的任务不做定时检查，只保留手动同步。
-		return nil
-	}
 	if task.ScheduleType == model.ScheduleCron {
 		spec := strings.TrimSpace(task.Cron)
 		sched, err := cronParser.Parse(spec)
