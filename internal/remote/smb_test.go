@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,8 +59,18 @@ type fakeSession struct {
 	createErr error
 	renameErr error
 	writeErr  error
+	dirErr    error
+	ensured   bool
 	closed    bool
 	body      bytes.Buffer
+}
+
+func (s *fakeSession) EnsureDir() error {
+	if s.dirErr != nil {
+		return s.dirErr
+	}
+	s.ensured = true
+	return nil
 }
 
 func (s *fakeSession) Create(name string) (io.WriteCloser, error) {
@@ -143,6 +155,9 @@ func TestUploadPublishesViaTempName(t *testing.T) {
 	}
 	if !sess.closed {
 		t.Fatal("session not closed")
+	}
+	if !sess.ensured {
+		t.Fatal("目标目录没有被确保存在")
 	}
 	if progressCalls == 0 {
 		t.Fatal("progress was never reported")
@@ -272,6 +287,75 @@ func TestSplitShareAndRemoteDir(t *testing.T) {
 	}
 	if got := joinRemote(`images`, "a.tar"); got != `images\a.tar` {
 		t.Fatalf("joinRemote = %q", got)
+	}
+}
+
+func TestUploadCreatesRemoteDirectory(t *testing.T) {
+	path := newArchive(t)
+
+	// 目录建不出来（通常是没权限）：直接把可操作的原因报出来，不要只说"创建文件失败"。
+	denied := &fakeSession{dirErr: fmt.Errorf("建目录: %w", fs.ErrPermission)}
+	err := upload(context.Background(), validSMB(), path, dialReturning(denied), nil)
+	if err == nil {
+		t.Fatal("directory failure must surface")
+	}
+	if !strings.Contains(err.Error(), "目录") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+	if len(denied.created) != 0 {
+		t.Fatalf("must not create a file when the directory is missing: %v", denied.created)
+	}
+
+	// 写临时文件被拒：提示账号缺少写权限。
+	writeDenied := &fakeSession{createErr: fs.ErrPermission}
+	err = upload(context.Background(), validSMB(), path, dialReturning(writeDenied), nil)
+	if err == nil {
+		t.Fatal("create permission failure must surface")
+	}
+	if !strings.Contains(err.Error(), "没有写权限") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+
+	// 目录不存在：提示目录层级。
+	missing := &fakeSession{createErr: fs.ErrNotExist}
+	err = upload(context.Background(), validSMB(), path, dialReturning(missing), nil)
+	if err == nil {
+		t.Fatal("missing directory must surface")
+	}
+	if !strings.Contains(err.Error(), "不存在") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+
+	// 重命名被拒：提示缺少修改/删除权限。
+	renameDenied := &fakeSession{renameErr: fs.ErrPermission}
+	err = upload(context.Background(), validSMB(), path, dialReturning(renameDenied), nil)
+	if err == nil {
+		t.Fatal("rename permission failure must surface")
+	}
+	if !strings.Contains(err.Error(), "重命名") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+}
+
+func TestSMBErrorHints(t *testing.T) {
+	cfg := validSMB()
+	cases := []struct {
+		name string
+		got  string
+		want []string
+	}{
+		{"create denied", createHint(fs.ErrPermission, cfg), []string{"没有写权限", cfg.Share}},
+		{"create missing dir", createHint(fs.ErrNotExist, cfg), []string{"不存在", cfg.Share}},
+		{"create other", createHint(errors.New("boom"), cfg), []string{"无法在共享"}},
+		{"rename denied", renameHint(fs.ErrPermission, cfg), []string{"重命名", "权限"}},
+		{"rename other", renameHint(errors.New("boom"), cfg), []string{"重命名"}},
+	}
+	for _, c := range cases {
+		for _, want := range c.want {
+			if !strings.Contains(c.got, want) {
+				t.Errorf("%s: %q missing %q", c.name, c.got, want)
+			}
+		}
 	}
 }
 

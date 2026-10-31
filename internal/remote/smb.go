@@ -8,8 +8,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -81,6 +83,8 @@ func UploadWithProgress(ctx context.Context, cfg model.SMBSettings, path string,
 
 // shareSession 是上传所需的最小远端接口，便于用假实现做单元测试。
 type shareSession interface {
+	// EnsureDir 保证配置里的相对目录存在，不存在就按需逐级创建。
+	EnsureDir() error
 	Create(name string) (io.WriteCloser, error)
 	Rename(oldName, newName string) error
 	Remove(name string) error
@@ -124,9 +128,14 @@ func upload(ctx context.Context, cfg model.SMBSettings, path string, dial dialFu
 	}
 	defer sess.Close()
 
+	// 目录不存在时自动创建：用户只需要填共享内相对路径，不用先去 NAS 上手工建目录。
+	if err := sess.EnsureDir(); err != nil {
+		return fmt.Errorf("SMB 上传失败: 准备目标目录失败: %w", err)
+	}
+
 	dst, err := sess.Create(partial)
 	if err != nil {
-		return fmt.Errorf("SMB 上传失败: 无法在共享 %s 中创建临时文件（检查目录是否存在、账号是否有写权限）: %w", cfg.Share, err)
+		return fmt.Errorf("SMB 上传失败: %s: %w", createHint(err, cfg), err)
 	}
 	copied, copyErr := copyChunks(ctx, dst, src, info.Size(), progress)
 	closeErr := dst.Close()
@@ -141,9 +150,29 @@ func upload(ctx context.Context, cfg model.SMBSettings, path string, dial dialFu
 	_ = sess.Remove(name)
 	if err := sess.Rename(partial, name); err != nil {
 		discard(ctx, sess, partial)
-		return fmt.Errorf("SMB 上传失败: 重命名 %s 失败: %w", name, err)
+		return fmt.Errorf("SMB 上传失败: %s: %w", renameHint(err, cfg), err)
 	}
 	return nil
+}
+
+// createHint 把 SMB 客户端返回的状态码翻译成可操作的中文提示。
+func createHint(err error, cfg model.SMBSettings) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Sprintf("账号在共享 %s 的目标目录里没有写权限（需要在 NTFS/共享权限里授予「修改」或「完全控制」）", cfg.Share)
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Sprintf("共享 %s 里的目标目录不存在，且没能自动创建（检查相对目录的层级）", cfg.Share)
+	default:
+		return fmt.Sprintf("无法在共享 %s 里创建临时文件", cfg.Share)
+	}
+}
+
+// renameHint 针对重命名失败给出提示：这一步最容易撞上「只读」或「没有删除权限」。
+func renameHint(err error, cfg model.SMBSettings) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Sprintf("账号在共享 %s 里没有重命名/覆盖权限（需要「修改」权限，且目标同名文件要能被删除）", cfg.Share)
+	}
+	return "重命名上传后的文件失败"
 }
 
 // discard 尽力清理远端临时文件。
@@ -220,6 +249,21 @@ type smbShareSession struct {
 	session *smb2.Session
 	fs      *smb2.Share
 	dir     string
+}
+
+func (s *smbShareSession) EnsureDir() error {
+	if s.dir == "" {
+		return nil
+	}
+	if err := s.fs.MkdirAll(s.dir, 0o755); err != nil {
+		switch {
+		case errors.Is(err, fs.ErrPermission):
+			return fmt.Errorf("无法创建远端目录 %s：账号没有在该共享里创建目录的权限（换成已存在的目录，或给账号「修改」权限）: %w", s.dir, err)
+		default:
+			return fmt.Errorf("无法创建远端目录 %s: %w", s.dir, err)
+		}
+	}
+	return nil
 }
 
 func (s *smbShareSession) Create(name string) (io.WriteCloser, error) {
