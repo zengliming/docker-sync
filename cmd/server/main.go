@@ -17,6 +17,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed the IANA time zone database so cron schedules keep working in images
+	// that do not ship /usr/share/zoneinfo (scratch, minimal distros).
+	_ "time/tzdata"
 
 	"docker-sync/internal/api"
 	"docker-sync/internal/cas"

@@ -139,9 +139,58 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  image:
+    name: 打包镜像 tar（linux/amd64）
+    needs: [test, meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 下载 linux/amd64 可执行文件
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-sync-linux-amd64
+          path: dist
+
+      # 用 Registry v2 API 拉基础镜像，再拼出 docker save 格式的归档，
+      # 因此 runner 上不需要 docker，也不用 docker build / docker save。
+      - name: 生成 docker save 归档
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          bin="dist/${BINARY}_${VERSION}_linux_amd64"
+          tar_name="${BINARY}-image-${VERSION}-linux-amd64.tar"
+          go run ./tools/imagebuild \
+            -base alpine:3.22 \
+            -binary "${bin}" \
+            -certs /etc/ssl/certs/ca-certificates.crt \
+            -tag "docker-sync:${VERSION}" \
+            -extra-tag docker-sync:latest \
+            -version "${VERSION}" \
+            -commit "${GITHUB_SHA}" \
+            -out "dist/${tar_name}"
+          (cd dist && sha256sum "${tar_name}" > "${tar_name}.sha256")
+          ls -l dist
+
+      - name: 上传镜像归档
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-sync-image-linux-amd64
+          path: dist/*image*.tar*
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: 创建 Release
-    needs: [meta, build]
+    needs: [meta, build, image]
     runs-on: ubuntu-latest
     steps:
       - name: 下载全部产物

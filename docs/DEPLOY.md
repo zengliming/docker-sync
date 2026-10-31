@@ -91,6 +91,62 @@ compose 场景用同名环境变量覆盖（`docker-compose.yml` 已把它们接
 若基础镜像已在本地（`docker images` 能看到 `golang:1.25-alpine` 与 `alpine:3.22`），
 不加 `--pull` 时构建会直接复用本地镜像，无需联网。
 
+### 2.2 不装 Docker 也能产出镜像 tar
+
+构建机完全没有 docker/podman/buildah（或者只想把产物拷到离线内网）时，可以用仓库自带的
+`tools/imagebuild`：它通过 Registry v2 API 拉基础镜像，用 `archive/tar` 拼出应用层，
+再按 `docker save` 格式落盘，全程只用 HTTP。
+
+```bash
+# 1) 交叉编译 Linux 静态二进制（0.1.4 换成你的版本，commit 可选）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags "-s -w -X main.version=0.1.4 -X main.commit=$(git rev-parse --short HEAD)" \
+  -o bin/docker-sync-linux-amd64 ./cmd/server
+
+# 2) 生成归档
+go run ./tools/imagebuild \
+  -base docker.io/library/alpine:3.22 \
+  -binary bin/docker-sync-linux-amd64 \
+  -certs /etc/ssl/certs/ca-certificates.crt \
+  -tag docker-sync:0.1.4 -extra-tag docker-sync:latest \
+  -version 0.1.4 -out dist/docker-sync-image-linux-amd64.tar
+```
+
+输出示例：
+
+```
+base docker.io/library/alpine:3.22: 1 layers, 3794968 bytes fetched
+app layer sha256:4d43fc9f… (gzip, diff sha256:26a8860f…)
+archive dist/docker-sync-image-linux-amd64.tar
+  size   19172864 bytes
+  sha256 c72a858e…
+  tags   [docker-sync:0.1.4 docker-sync:latest]
+```
+
+拿到归档的机器上直接加载运行（不需要 `docker build`，也不需要联网）：
+
+```bash
+docker load -i docker-sync-image-linux-amd64.tar
+docker run -d --name docker-sync -p 8080:8080 -v /srv/docker-sync:/data docker-sync:0.1.4
+sudo chown -R 10001:10001 /srv/docker-sync   # 容器以 UID 10001 运行
+```
+
+参数说明：
+
+| flag | 说明 |
+| --- | --- |
+| `-base` | 基础镜像引用，可指向镜像站，如 `docker.m.daocloud.io/library/alpine:3.22` |
+| `-binary` | 上一步产出的 Linux 二进制（ELF，`CGO_ENABLED=0`） |
+| `-certs` | 打进镜像的 PEM CA 包；Windows 可用 `D:\Program Files\Git\usr\ssl\certs\ca-bundle.crt` |
+| `-tag` / `-extra-tag` | 写进 `manifest.json` 的 RepoTags，第二个可留空 |
+| `-version` / `-commit` | 写入 OCI label 与 `history`，便于 `docker inspect` 溯源 |
+| `-out` | 输出路径，默认 `dist/docker-sync-image-linux-amd64.tar` |
+
+镜像内容与 Dockerfile 的运行阶段一致：`/app/docker-sync`（静态二进制，含 IANA 时区库）、
+`/data` 数据卷、UID/GID 10001、`EXPOSE 8080`、`ENTRYPOINT ["/app/docker-sync"]`、
+`CMD ["-addr", ":8080", "-data", "/data"]`。工具最后会调用 `save.Validate` 校验归档，
+并打印 sha256；`release.yml` 的 `image` job 也用同一工具生成发布资产。
+
 ## 3. 运行容器
 
 ### 3.1 docker compose（推荐）

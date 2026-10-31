@@ -200,6 +200,48 @@ chmod +x docker-sync_0.1.0_linux_amd64
 
 Windows 上数据目录里含 tar、blob 缓存与 `state.json`，建议放在磁盘空间充足的位置（默认 `.\data`）。
 
+### 方式四：离线加载镜像 tar（内网机器首选）
+
+目标机器连不上 Docker Hub、只能拷文件过去时，直接 `docker load` 一个镜像归档即可：
+
+```bash
+docker load -i docker-sync-image-linux-amd64.tar
+# Loaded image: docker-sync:0.1.4
+# Loaded image: docker-sync:latest
+
+docker run -d --name docker-sync \
+  -p 8080:8080 \
+  -v /srv/docker-sync:/data \
+  -e TZ=Asia/Shanghai \
+  docker-sync:0.1.4
+```
+
+镜像里已包含可执行文件、CA 证书与 `docker-sync` 用户（UID/GID 10001），
+`/data` 是数据卷，`-addr :8080 -data /data` 已是默认 CMD。挂载的宿主机目录需要
+UID 10001 可写（`sudo chown -R 10001:10001 /srv/docker-sync`）。
+
+这个归档不带任何构建缓存，也不需要本机装 Docker 才能生成——本仓库自带一个
+维护者工具，用 Registry v2 API 拉基础镜像后自己拼出 `docker save` 格式的 tar：
+
+```bash
+# 1) 交叉编译 Linux 静态二进制
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags "-s -w -X main.version=0.1.4" \
+  -o bin/docker-sync-linux-amd64 ./cmd/server
+
+# 2) 生成镜像 tar（只用 HTTP，不依赖 docker/podman/buildah）
+go run ./tools/imagebuild \
+  -base docker.io/library/alpine:3.22 \
+  -binary bin/docker-sync-linux-amd64 \
+  -certs /etc/ssl/certs/ca-certificates.crt \
+  -tag docker-sync:0.1.4 -extra-tag docker-sync:latest \
+  -version 0.1.4 -out dist/docker-sync-image-linux-amd64.tar
+```
+
+`-base` 可以指向镜像站（例如 `docker.m.daocloud.io/library/alpine:3.22`），
+`-certs` 在不带系统 CA 的机器上可指向任意 PEM 证书包（Windows 下可用
+`D:\Program Files\Git\usr\ssl\certs\ca-bundle.crt`）；工具会打印归档大小与 SHA256。
+
 ## 配置项
 
 优先级：命令行 flag > 环境变量 > 默认值。下面每一项都同时支持 flag 与 env。
@@ -490,13 +532,14 @@ docker pull 192.168.1.10:8080/library/alpine:3.20
 2. **手动运行**：Actions 页面选 `release` → `Run workflow`，填入版本号（如 `v0.1.0`）；
    不会新建 git tag，但会在默认分支 HEAD 上创建/更新 Release。
 
-流水线分四步：
+流水线分五步：
 
 | Job | 内容 |
 | --- | --- |
 | `test` | `gofmt -l .` 无输出、`go vet ./...`、`go test ./...`，任一失败即中止发布 |
 | `meta` | 从 tag 解析版本号（`v0.1.0` → `0.1.0`） |
 | `build` | 矩阵编译 `linux/amd64`、`linux/arm64`、`windows/amd64`；`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<版本> -X main.commit=<sha>"`，Linux 打 `.tar.gz`、Windows 打 `.zip`，并生成逐个文件的 sha256 |
+| `image` | 用 `tools/imagebuild` 把 `linux/amd64` 二进制 + 基础镜像拼成 `docker-sync-image-<版本>-linux-amd64.tar`（`docker load` 可用，不需要 docker 守护进程） |
 | `release` | 汇总所有产物 + `SHA256SUMS.txt`，用 `gh release create`（已存在则 `upload --clobber`）发布 |
 
 构建出的版本号会显示在控制台右上角与 `GET /api/overview` 的 `version` 字段里。版本串后面还会带上 git 提交号，例如 `0.1.2+1cdc758`——本地 `go build` 会自动从 `go build` 嵌入的 VCS 信息里读取，工作区有未提交改动时再加 `-dirty`，这样“页面是不是新代码”一眼可辨：
@@ -509,7 +552,7 @@ $ curl -s localhost:8080/api/overview | grep -o '"version":"[^"]*"'
 
 注意：
 
-- Release 里只有**裸可执行文件**，不含 Docker 镜像；容器镜像仍按 [docs/DEPLOY.md](docs/DEPLOY.md) 自行 `docker build`。
+- Release 里既有裸可执行文件，也有一个可直接 `docker load` 的镜像归档（`docker-sync-image-<版本>-linux-amd64.tar`，内含 `docker-sync:<版本>` 与 `docker-sync:latest` 两个 tag）；要自定义基础镜像或做多架构镜像时仍可自行 `docker build`，见 [docs/DEPLOY.md](docs/DEPLOY.md) 与[方式四](#方式四离线加载镜像-tar内网机器首选)。
 - 需要给仓库开启 Actions 写权限（工作流已声明 `permissions: contents: write`，用于创建 Release）。
 - 想加 Windows arm64 或 `linux/386`，在 `release.yml` 的 `matrix` 里加一行（或删掉 `exclude`）即可。
 
