@@ -47,6 +47,9 @@ var (
 	ErrInvalidInput = errors.New("invalid task")
 	// errDisabled means a scheduled trigger found the task disabled.
 	errDisabled = errors.New("task is disabled")
+	// errIgnoredLatest means a scheduled trigger was skipped because the task
+	// watches the moving "latest" tag and asked for it to be ignored.
+	errIgnoredLatest = errors.New("task ignores the latest tag")
 )
 
 // cronParser accepts exactly the standard five fields (minute hour dom month
@@ -368,12 +371,16 @@ func (s *Scheduler) checkDueTasks() {
 		if !t.Enabled || t.ScheduleType != model.ScheduleInterval {
 			continue
 		}
-		if t.NextRunAt != nil && now.Before(*t.NextRunAt) {
+		if t.NextRunAt == nil {
+			// 没有下次运行时间：任务被忽略 latest 标记排除了定时调度。
+			continue
+		}
+		if now.Before(*t.NextRunAt) {
 			continue
 		}
 		entry := t
 		if _, err := s.StartCheck(entry.ID, model.TriggerSchedule); err != nil {
-			if errors.Is(err, ErrBusy) {
+			if errors.Is(err, ErrBusy) || errors.Is(err, errIgnoredLatest) {
 				continue
 			}
 			s.log.Warn("定时检查启动失败", "task", entry.ID, "image", entry.Image, "error", err)
@@ -472,6 +479,10 @@ func (s *Scheduler) syncCronEntry(task *model.Task) {
 	if !task.Enabled || task.ScheduleType != model.ScheduleCron {
 		return
 	}
+	if latestTagIgnored(*task, model.TriggerSchedule) {
+		// 忽略 latest 的任务只保留手动触发，不安装 cron 条目。
+		return
+	}
 	spec := strings.TrimSpace(task.Cron)
 	if _, err := cronParser.Parse(spec); err != nil {
 		s.log.Warn("任务 cron 表达式无效，忽略该任务", "task", task.ID, "cron", task.Cron, "error", err)
@@ -481,7 +492,7 @@ func (s *Scheduler) syncCronEntry(task *model.Task) {
 	image := task.Image
 	id, err := s.cron.AddFunc(spec, func() {
 		if _, err := s.StartCheck(taskID, model.TriggerSchedule); err != nil {
-			if errors.Is(err, ErrBusy) || errors.Is(err, errDisabled) {
+			if errors.Is(err, ErrBusy) || errors.Is(err, errDisabled) || errors.Is(err, errIgnoredLatest) {
 				return
 			}
 			s.log.Warn("cron 检查启动失败", "task", taskID, "image", image, "error", err)
@@ -529,6 +540,10 @@ func (s *Scheduler) reschedule(taskID string) {
 
 // computeNext returns the next scheduled check time for a task.
 func (s *Scheduler) computeNext(task model.Task, now time.Time) *time.Time {
+	if latestTagIgnored(task, model.TriggerSchedule) {
+		// 忽略 latest 的任务不做定时检查，只保留手动同步。
+		return nil
+	}
 	if task.ScheduleType == model.ScheduleCron {
 		spec := strings.TrimSpace(task.Cron)
 		sched, err := cronParser.Parse(spec)

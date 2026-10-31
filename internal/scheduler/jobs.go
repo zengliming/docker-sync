@@ -25,6 +25,23 @@ type CheckResult struct {
 	Platform        string
 }
 
+// latestTagIgnored reports whether an automatic run must be skipped because the
+// task watches the moving "latest" tag and opted out of automatic runs.
+// Manual triggers (model.TriggerManual / model.TriggerCheck) always go through.
+func latestTagIgnored(task model.Task, trigger string) bool {
+	if trigger != model.TriggerSchedule || !task.IgnoreLatest {
+		return false
+	}
+	ref, err := registry.Parse(task.Image)
+	if err != nil {
+		return false
+	}
+	if ref.Digest != "" {
+		return false
+	}
+	return ref.Tag == "latest"
+}
+
 // TriggerSync queues a full synchronisation of the task. trigger is
 // model.TriggerManual for user triggered syncs and model.TriggerSchedule for
 // automatic follow-up syncs. force bypasses the digest skip optimisation.
@@ -35,6 +52,10 @@ func (s *Scheduler) TriggerSync(taskID, trigger string, force bool) (model.Run, 
 	task, ok := s.store.GetTask(taskID)
 	if !ok {
 		return model.Run{}, ErrNotFound
+	}
+	if latestTagIgnored(task, trigger) {
+		s.reschedule(taskID)
+		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
 	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
@@ -70,6 +91,10 @@ func (s *Scheduler) StartCheck(taskID, trigger string) (model.Run, error) {
 	}
 	if trigger == model.TriggerSchedule && !task.Enabled {
 		return model.Run{}, fmt.Errorf("%w: %s", errDisabled, taskID)
+	}
+	if latestTagIgnored(task, trigger) {
+		s.reschedule(taskID)
+		return model.Run{}, fmt.Errorf("%w: %s", errIgnoredLatest, taskID)
 	}
 	if !s.Started() {
 		return model.Run{}, ErrNotStarted
@@ -142,6 +167,10 @@ func (s *Scheduler) executeSync(j *job) {
 	task, ok := s.store.GetTask(j.taskID)
 	if !ok {
 		s.finishRun(j.runID, model.RunStatusCanceled, "任务已删除", nil, time.Now())
+		return
+	}
+	if latestTagIgnored(task, j.trigger) {
+		s.finishRun(j.runID, model.RunStatusSkipped, "已忽略 latest 标签，跳过自动同步", nil, time.Now())
 		return
 	}
 	s.startRun(j, task, model.PhaseResolving)
@@ -363,6 +392,10 @@ func (s *Scheduler) executeCheck(j *job) bool {
 	}
 	if j.trigger == model.TriggerSchedule && !task.Enabled {
 		s.finishRun(j.runID, model.RunStatusCanceled, "任务已禁用，跳过检查", nil, time.Now())
+		return false
+	}
+	if latestTagIgnored(task, j.trigger) {
+		s.finishRun(j.runID, model.RunStatusSkipped, "已忽略 latest 标签，跳过自动检查", nil, time.Now())
 		return false
 	}
 	s.startRun(j, task, model.PhaseResolving)

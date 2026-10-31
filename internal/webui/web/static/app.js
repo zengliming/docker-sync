@@ -69,7 +69,14 @@
     runPollTimer: null,
     taskModal: null,
     confirmResolve: null,
-    eventSource: null
+    eventSource: null,
+    /* 自动刷新节流：SSE 事件防抖 + 用户操作期间暂停整页重绘 */
+    refreshPause: 0,
+    refreshPending: false,
+    sseTimer: null,
+    modalPause: false,
+    drawerPause: false,
+    lastViewKey: ''
   };
 
   const loadTokens = Object.create(null);
@@ -632,6 +639,11 @@
   }
 
   function loadRouteData(route, silent) {
+    // 自动刷新（silent）在用户操作期间直接延后，避免打断点击与输入。
+    if (silent && autoRefreshPaused()) {
+      state.refreshPending = true;
+      return;
+    }
     switch (route) {
       case 'dashboard': loadOverview(silent); break;
       case 'tasks': loadTasks(silent); break;
@@ -773,9 +785,13 @@
     const errorLine = task.lastError
       ? '<div class="cell-sub error-text" title="' + esc(task.lastError) + '">' + esc(truncate(task.lastError, 30)) + '</div>'
       : '';
+    const ignoreLatestLine = task.ignoreLatest
+      ? '<div class="cell-sub"><span class="badge badge-latest" title="tag 为 latest 时不做定时检查与自动同步，仅手动同步">忽略 latest</span></div>'
+      : '';
     return '<tr>' +
       '<td><div class="cell-main">' + esc(task.name || task.image || task.id) + '</div>' +
-      '<div class="cell-sub mono" title="' + esc(task.image || '') + '">' + esc(task.image || '') + '</div></td>' +
+      '<div class="cell-sub mono" title="' + esc(task.image || '') + '">' + esc(task.image || '') + '</div>' +
+      ignoreLatestLine + '</td>' +
       '<td><span class="mono">' + esc(task.platform || '默认') + '</span></td>' +
       '<td>' + scheduleCell(task) + '</td>' +
       '<td>' + taskStatusBadge(task.status, task.lastError) + errorLine + '</td>' +
@@ -1044,6 +1060,10 @@
     state.drawerRunId = id;
     state.drawerRun = null;
     state.drawerError = null;
+    if (!state.drawerPause) {
+      state.drawerPause = true;
+      pauseAutoRefresh();
+    }
     renderDrawer();
     loadRunDetail(id, false);
     startRunPolling();
@@ -1055,6 +1075,10 @@
     state.drawerRun = null;
     state.drawerError = null;
     renderDrawer();
+    if (state.drawerPause) {
+      state.drawerPause = false;
+      resumeAutoRefresh();
+    }
   }
 
   function startRunPolling() {
@@ -1577,9 +1601,42 @@
     settings: renderSettings
   };
 
+  /* 自动刷新节流：操作期间冻结重绘，事件合并后再拉数据 ------------------ */
+
+  // pauseAutoRefresh/resumeAutoRefresh 成对调用（计数），在点击操作、任务
+  // 弹窗、确认框、运行详情抽屉打开期间冻结自动刷新：否则 SSE 事件与 15 秒
+  // 轮询会不停替换 #view 的 DOM，页面看起来一直在闪，还容易点错。
+  function pauseAutoRefresh() {
+    state.refreshPause += 1;
+  }
+
+  function resumeAutoRefresh() {
+    if (state.refreshPause > 0) state.refreshPause -= 1;
+    if (state.refreshPause > 0 || !state.refreshPending) return;
+    state.refreshPending = false;
+    loadRouteData(state.route, true);
+  }
+
+  function autoRefreshPaused() {
+    return state.refreshPause > 0;
+  }
+
+  // 同一批 SSE 事件合并成一次数据拉取，避免一次同步触发十几次重绘。
+  function scheduleDataRefresh(fn) {
+    if (state.sseTimer) window.clearTimeout(state.sseTimer);
+    state.sseTimer = window.setTimeout(function () {
+      state.sseTimer = null;
+      fn();
+    }, 250);
+  }
+
   function render() {
     const view = document.getElementById('view');
     if (!view) return;
+    if (autoRefreshPaused()) {
+      state.refreshPending = true;
+      return;
+    }
     const page = PAGES[state.route] || renderDashboard;
     let html;
     try {
@@ -1587,7 +1644,34 @@
     } catch (err) {
       html = errorCard('页面渲染失败：' + (err && err.message ? err.message : '未知错误'), 'refresh');
     }
+    // 内容与上次完全一致时不要碰 DOM：这是任务页不再闪烁的关键。
+    const key = state.route + '\u0000' + html;
+    if (state.lastViewKey === key) return;
+    state.lastViewKey = key;
+
+    const scroller = document.scrollingElement || document.documentElement;
+    const scrollTop = (scroller && scroller.scrollTop) || window.pageYOffset || 0;
+
+    // 记住当前焦点所在的按钮，重绘后放回去，键盘操作不会丢焦点。
+    let focusSel = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && view.contains(active) && active.getAttribute) {
+      const action = active.getAttribute('data-action');
+      if (action) {
+        const id = active.getAttribute('data-id');
+        focusSel = '[data-action="' + action + '"]' + (id ? '[data-id="' + id + '"]' : '');
+      }
+    }
+
     view.innerHTML = html;
+
+    if (focusSel) {
+      const next = view.querySelector(focusSel);
+      if (next && typeof next.focus === 'function') {
+        try { next.focus({ preventScroll: true }); } catch (err) { /* 老浏览器忽略 */ }
+      }
+    }
+    if (scrollTop > 0) window.scrollTo(0, scrollTop);
   }
 
   function updateChrome() {
@@ -1722,16 +1806,26 @@
   function handleUpdateEvent(payload) {
     const type = payload.type;
     const id = payload.id;
+    if (autoRefreshPaused()) {
+      state.refreshPending = true;
+      return;
+    }
     if (type === 'task') {
-      loadTasks(true);
-      loadOverview(true);
+      scheduleDataRefresh(function () {
+        loadTasks(true);
+        loadOverview(true);
+      });
     } else if (type === 'run') {
-      loadRuns(true);
-      loadOverview(true);
+      scheduleDataRefresh(function () {
+        loadRuns(true);
+        loadOverview(true);
+      });
       if (state.drawerRunId && (!id || id === state.drawerRunId)) loadRunDetail(state.drawerRunId, true);
     } else if (type === 'file') {
-      loadFiles(true);
-      loadOverview(true);
+      scheduleDataRefresh(function () {
+        loadFiles(true);
+        loadOverview(true);
+      });
     } else if (type === 'settings' && state.route !== 'settings') {
       loadSettings(true, false);
     }
@@ -1745,6 +1839,12 @@
   function openModalHtml(html) {
     const root = document.getElementById('modal-root');
     if (!root) return;
+    // 弹窗打开期间冻结自动刷新：否则后台刷新会把整页重绘，用户正在填的表
+    // 单会被重置、点击也会落空。
+    if (!state.modalPause) {
+      state.modalPause = true;
+      pauseAutoRefresh();
+    }
     root.innerHTML = html;
     document.body.classList.add('modal-open');
     const focusEl = root.querySelector('[data-autofocus]') || root.querySelector('input, select, textarea, button');
@@ -1757,6 +1857,11 @@
     const root = document.getElementById('modal-root');
     if (root) root.innerHTML = '';
     document.body.classList.remove('modal-open');
+    // 只有真正没有任何弹窗时才恢复自动刷新（确认框可能盖在任务表单上再关掉）。
+    if (state.modalPause && !(root && root.firstChild)) {
+      state.modalPause = false;
+      resumeAutoRefresh();
+    }
   }
 
   function closeModal() {
@@ -1803,6 +1908,7 @@
     const platformValue = platformCustom ? '__custom__' : platform;
     const keepVersions = num(t.keepVersions) > 0 ? num(t.keepVersions) : 3;
     const autoSync = t.autoSync === undefined ? true : !!t.autoSync;
+    const ignoreLatest = !!t.ignoreLatest;
     const enabled = t.enabled === undefined ? true : !!t.enabled;
     const name = t.name || '';
     const image = t.image || '';
@@ -1846,6 +1952,10 @@
       '<div class="field"><label class="check" for="task-autosync">' +
       '<input id="task-autosync" name="autoSync" type="checkbox"' + (autoSync ? ' checked' : '') + '>' +
       '<span>自动同步<small>定时检查发现新版本时自动拉取并生成 tar；关闭后仅在任务页标记「有新版本」，等待手动同步。</small></span>' +
+      '</label></div>' +
+      '<div class="field"><label class="check" for="task-ignore-latest">' +
+      '<input id="task-ignore-latest" name="ignoreLatest" type="checkbox"' + (ignoreLatest ? ' checked' : '') + '>' +
+      '<span>忽略 latest<small>镜像用 latest 标签时不做定时检查、也不自动同步（latest 每次上游推送都会变）；需要更新时手动点「立即同步」。</small></span>' +
       '</label></div>' +
       '<div class="grid-2">' +
       '<div class="field"><label for="task-keep">保留份数</label>' +
@@ -1973,6 +2083,7 @@
         intervalMinutes: isFinite(interval) && interval > 0 ? interval : 60,
         cron: scheduleType === 'cron' ? cron : '',
         autoSync: fd.get('autoSync') === 'on',
+        ignoreLatest: fd.get('ignoreLatest') === 'on',
         keepVersions: keepVersions,
         enabled: fd.get('enabled') === 'on'
       };
@@ -2431,9 +2542,15 @@
       if (actionEl) {
         if (actionEl.classList.contains('modal-backdrop') && event.target !== actionEl) return;
         const action = actionEl.getAttribute('data-action');
-        Promise.resolve(handleAction(action, actionEl)).catch(function (err) {
-          toast(err && err.message ? err.message : '操作失败', 'error');
-        });
+        // 点击操作期间冻结自动刷新，操作结束后再补一次刷新。
+        pauseAutoRefresh();
+        Promise.resolve(handleAction(action, actionEl))
+          .catch(function (err) {
+            toast(err && err.message ? err.message : '操作失败', 'error');
+          })
+          .then(function () {
+            resumeAutoRefresh();
+          });
         return;
       }
       const row = event.target.closest('tr[data-run-id]');

@@ -57,6 +57,7 @@
   "intervalMinutes": 60,
   "cron": "",
   "autoSync": true,
+  "ignoreLatest": false,
   "keepVersions": 3,
   "enabled": true,
   "status": "idle",
@@ -86,6 +87,7 @@
 | `intervalMinutes` | interval 模式下间隔分钟数，最小 1 |
 | `cron` | cron 模式下的 5 段标准 cron（分 时 日 月 周），服务器本地时区 |
 | `autoSync` | 定时检查发现新 digest 时是否自动 pull 并生成 tar；false 时只记录 `updateAvailable` |
+| `ignoreLatest` | true 时，镜像 tag 为 `latest`（含不写 tag 的写法）的任务不参与定时检查与自动同步：不进调度（`nextRunAt` 为空）、不产生定时运行记录；手动「立即同步」「检查更新」不受影响。tag 改成具体版本或 digest 后自动恢复调度 |
 | `keepVersions` | 该任务保留的 tar 份数（1–50），旧文件自动清理 |
 | `status` | `idle` / `queued` / `running` / `error` / `paused` |
 | `lastDigest` | 上一次成功同步的平台 manifest digest |
@@ -106,6 +108,7 @@
   "intervalMinutes": 60,
   "cron": "",
   "autoSync": true,
+  "ignoreLatest": false,
   "keepVersions": 3,
   "enabled": true
 }

@@ -67,6 +67,7 @@ func (s *Server) applyTaskInput(base model.Task, in model.TaskInput) (model.Task
 	}
 
 	t.AutoSync = in.AutoSync
+	t.IgnoreLatest = in.IgnoreLatest
 	t.KeepVersions = in.KeepVersions
 	if t.KeepVersions <= 0 {
 		t.KeepVersions = 3

@@ -189,6 +189,7 @@ type taskEnvelope struct {
 	IntervalMinute int    `json:"intervalMinutes"`
 	Cron           string `json:"cron"`
 	AutoSync       bool   `json:"autoSync"`
+	IgnoreLatest   bool   `json:"ignoreLatest"`
 	KeepVersions   int    `json:"keepVersions"`
 	Enabled        bool   `json:"enabled"`
 	Status         string `json:"status"`
@@ -216,6 +217,26 @@ func TestCreateTaskAppliesDefaults(t *testing.T) {
 	}
 	if got.Name != got.Image {
 		t.Fatalf("name = %q, want image", got.Name)
+	}
+}
+
+func TestTaskIgnoreLatestRoundTrip(t *testing.T) {
+	env := newTestEnv(t)
+	created := decodeBody[taskEnvelope](t, env.do(t, http.MethodPost, "/api/tasks",
+		`{"image":"alpine:latest","ignoreLatest":true,"enabled":true}`))
+	if !created.IgnoreLatest {
+		t.Fatalf("created.ignoreLatest = false, want true")
+	}
+
+	got := decodeBody[taskEnvelope](t, env.do(t, http.MethodGet, "/api/tasks/"+created.ID, ""))
+	if !got.IgnoreLatest {
+		t.Fatalf("stored ignoreLatest = false, want true")
+	}
+
+	updated := decodeBody[taskEnvelope](t, env.do(t, http.MethodPut, "/api/tasks/"+created.ID,
+		`{"image":"alpine:latest","enabled":true}`))
+	if updated.IgnoreLatest {
+		t.Fatalf("updated.ignoreLatest = true, want false after omitting the field")
 	}
 }
 

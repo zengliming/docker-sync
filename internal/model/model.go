@@ -73,6 +73,10 @@ type Task struct {
 	// scheduled check detects a new digest. When false the check only records
 	// that an update is available.
 	AutoSync bool `json:"autoSync"`
+	// IgnoreLatest skips scheduled checks and automatic pulls for tasks whose
+	// reference points at the "latest" tag, because that tag moves on every
+	// upstream push. Manual syncs and manual checks still run.
+	IgnoreLatest bool `json:"ignoreLatest"`
 	// KeepVersions is how many tar artifacts are kept per task (>= 1).
 	KeepVersions int  `json:"keepVersions"`
 	Enabled      bool `json:"enabled"`
@@ -109,6 +113,7 @@ type TaskInput struct {
 	IntervalMinutes int    `json:"intervalMinutes"`
 	Cron            string `json:"cron"`
 	AutoSync        bool   `json:"autoSync"`
+	IgnoreLatest    bool   `json:"ignoreLatest"`
 	KeepVersions    int    `json:"keepVersions"`
 	Enabled         bool   `json:"enabled"`
 }
